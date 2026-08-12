@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "sphere": {
+      "command": "npx",
+      "args": ["tsx", "src/mcp-server.ts"],
+      "env": {}
+    }
+  }
+}

@@ -1,0 +1,47 @@
+name: Sync tasks (dispatch)
+
+on:
+  repository_dispatch:
+    types: [sphere-task-updated]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout sphere-integration
+        uses: actions/checkout@v4
+
+      - name: Checkout sphere-tasks
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.TASKS_REPO }}
+          token: ${{ secrets.TASKS_REPO_TOKEN }}
+          path: sphere-tasks
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure git
+        run: |
+          git -C sphere-tasks config user.name "sphere-sync"
+          git -C sphere-tasks config user.email "sphere-sync@noreply"
+
+      - name: Sync task
+        env:
+          B24_WEBHOOK_URL: ${{ secrets.B24_WEBHOOK_URL }}
+          B24_GROUP_IDS: ${{ vars.B24_GROUP_IDS }}
+          TASKS_REPO_PATH: ${{ github.workspace }}/sphere-tasks
+          TASK_ID: ${{ github.event.client_payload.task_id }}
+        run: |
+          if [ -n "$TASK_ID" ]; then
+            npm run sync -- "$TASK_ID"
+          else
+            npm run sync
+          fi

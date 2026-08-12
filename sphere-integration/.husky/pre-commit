@@ -1,0 +1,13 @@
+#!/bin/sh
+. "$(dirname "$0")/_/husky.sh"
+
+GIT_ROOT=$(git rev-parse --show-toplevel)
+REBASE_PATH="$GIT_ROOT/.git/rebase-merge"
+MERGE_PATH="$GIT_ROOT/.git/MERGE_HEAD"
+
+if [ -f "$REBASE_PATH" ] || [ -f "$MERGE_PATH" ]; then
+  echo "Skipping Husky pre-commit hook: We are in the middle of a rebase or merge."
+else
+  echo "Running Husky pre-commit hook: Formatting affected files"
+  npx lint-staged
+fi

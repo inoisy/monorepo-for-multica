@@ -1,0 +1,62 @@
+{
+  "name": "sphere-integration",
+  "version": "2.0.0",
+  "description": "MCP server + CLI for Bitrix24 Sphere task management",
+  "type": "module",
+  "scripts": {
+    "fetch-my-tasks-api": "tsx src/cli.ts fetch-my-tasks-api",
+    "sync": "tsx src/cli.ts sync",
+    "sync:task": "tsx src/cli.ts sync",
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "check": "npm run typecheck && npm run lint",
+    "webhook": "tsx src/cli.ts webhook",
+    "mcp:inspect": "npx @modelcontextprotocol/inspector --transport stdio -- npx tsx src/mcp-server.ts",
+    "docker:build": "docker build --target runtime -t sphere-api:latest .",
+    "docker:up": "docker compose up --abort-on-container-exit sphere-api",
+    "prepare": "husky",
+    "sprint-sync:pull": "tsx src/cli.ts sprint-sync pull",
+    "sprint-sync:push": "tsx src/cli.ts sprint-sync push",
+    "sprint-sync:status": "tsx src/cli.ts sprint-sync status",
+    "sprint-sync:logs": "tsx src/cli.ts sprint-sync logs",
+    "sprint-sync:dev": "tsx src/sprint-sync/api-server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "sql.js": "^1.10.3",
+    "commander": "^11.1.0",
+    "consola": "^3.4.2",
+    "csv-writer": "^1.6.0",
+    "dotenv": "^16.3.0",
+    "express": "^4.18.2",
+    "mammoth": "^1.12.0",
+    "pdf-parse": "^2.4.5",
+    "sharp": "^0.34.5",
+    "turndown": "^7.2.4",
+    "undici": "^8.5.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/sql.js": "^1.4.0",
+    "@types/express": "^4.17.20",
+    "@types/node": "^20.0.0",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/turndown": "^5.0.6",
+    "@typescript-eslint/eslint-plugin": "^8.59.2",
+    "@typescript-eslint/parser": "^8.59.2",
+    "eslint": "^10.3.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.2",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0",
+    "typescript-eslint": "^8.59.2",
+    "vitest": "^4.1.4"
+  },
+  "lint-staged": {
+    "src/**/*.ts": "eslint --fix"
+  }
+}

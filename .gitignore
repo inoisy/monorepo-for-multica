@@ -1,0 +1,18 @@
+# Top-level ignores for the monorepo as a whole.
+# Each project ships its own .gitignore inside its directory; this file
+# only catches files that would otherwise land at the monorepo root.
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Tooling caches that may appear at root
+.cache/
+.turbo/
+.nx/
+
+# Local-only files that should never be committed
+*.local

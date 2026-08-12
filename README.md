@@ -24,6 +24,11 @@ Each top-level directory holds one self-contained Multica project:
 Projects are independent — there is no shared build graph, lockfile, or
 tooling version pinned at the monorepo root. Each project ships its own.
 
+## Current projects
+
+- `sphere-integration/` — MCP server + CLI for Bitrix24 Sphere task
+  management (Node.js, TypeScript). See `sphere-integration/README.md`.
+
 ## Conventions
 
 - One directory per project. No nesting of projects inside other projects.

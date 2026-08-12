@@ -1,0 +1,8 @@
+node_modules/
+dist/
+output/
+.env
+*.html
+*.png
+.idea/
+.git/

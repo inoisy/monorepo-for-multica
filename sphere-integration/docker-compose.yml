@@ -1,0 +1,16 @@
+services:
+  sphere-api:
+    build:
+      context: .
+      target: runtime
+    container_name: sphere-api
+    environment:
+      - B24_WEBHOOK_URL=${B24_WEBHOOK_URL:-}
+      - B24_USER_ID=${B24_USER_ID:-425}
+      - NODE_ENV=production
+    stdin_open: true
+    tty: true
+    # For webhook server mode, uncomment:
+    # ports:
+    #   - "3100:3100"
+    # command: ["node", "dist/webhook-server.js"]
