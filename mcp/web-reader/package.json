@@ -1,5 +1,5 @@
 {
-  "name": "@multica/web-reader",
+  "name": "web-reader",
   "version": "0.1.0",
   "private": true,
   "description": "MCP server that reads web pages and extracts clean markdown content. Handles JavaScript-rendered and anti-bot-protected sites via CloakBrowser (stealth Chromium).",

@@ -1,4 +1,4 @@
-# @multica/web-reader
+# web-reader
 
 MCP server with a single tool — `web_reader` — that fetches a web page and
 returns clean markdown. Pages that need JavaScript, or that answer an ordinary

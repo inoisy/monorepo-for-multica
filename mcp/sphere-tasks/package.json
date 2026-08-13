@@ -1,5 +1,5 @@
 {
-  "name": "@multica/sphere-tasks",
+  "name": "sphere-tasks",
   "version": "2.0.0",
   "description": "MCP server + CLI for Bitrix24 Sphere task management",
   "type": "module",
