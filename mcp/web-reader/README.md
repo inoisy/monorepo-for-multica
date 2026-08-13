@@ -42,7 +42,7 @@ stdio, pointing at the built entry point:
   "mcpServers": {
     "web-reader": {
       "command": "node",
-      "args": ["/abs/path/to/search-mcp/dist/index.js"]
+      "args": ["/abs/path/to/mcp/web-reader/dist/index.js"]
     }
   }
 }

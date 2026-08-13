@@ -12,30 +12,41 @@ Multica-authored code.
 
 ## Layout
 
-Each top-level directory holds one self-contained Multica project:
+Top-level directories are categories. Each category holds self-contained
+projects, one directory per project:
 
 ```
-<project-name>/
-  src/
-  tests/
-  README.md
+<category>/
+  <project-name>/
+    src/
+    tests/
+    README.md
 ```
+
+Everything here is MCP servers so far, so `mcp/` is the only category. New
+kinds of work get their own top-level directory (`services/`, `libs/`, …)
+rather than landing next to the MCP servers.
 
 Projects are independent — there is no shared build graph, lockfile, or
 tooling version pinned at the monorepo root. Each project ships its own.
 
 ## Current projects
 
-- `sphere-integration/` — MCP server + CLI for Bitrix24 Sphere task
-  management (Node.js, TypeScript). See `sphere-integration/README.md`.
-- `search-mcp/` — `@search-mcp/web-reader` MCP server: reads web pages and
-  returns clean markdown, with a Playwright/CloakBrowser fallback for
-  JS-rendered and anti-bot-protected sites (Node.js, TypeScript, pnpm).
-  See `search-mcp/README.md`.
+### `mcp/` — MCP servers
+
+- `mcp/web-reader/` — reads a web page and returns clean markdown, falling
+  back to stealth Chromium (CloakBrowser) for JS-rendered and
+  anti-bot-protected sites. Node.js, TypeScript, pnpm.
+  See `mcp/web-reader/README.md`.
+- `mcp/sphere-tasks/` — MCP server + CLI for Bitrix24 Sphere
+  (`sphere.loodsen.ru`) task management, sprint sync, and webhooks.
+  Node.js, TypeScript, npm. See `mcp/sphere-tasks/README.md`.
 
 ## Conventions
 
-- One directory per project. No nesting of projects inside other projects.
+- Name a directory after what it does, not after the repo it came from.
+- One directory per project, inside a category. No nesting of projects inside
+  other projects.
 - Keep project-level `README.md` self-explanatory; the monorepo README only
   documents cross-cutting storage conventions.
 - Use the project's own commit/PR workflow — branches here are not gated by
