@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "sphere-integration": {
-      "command": "/Users/evgenijakutov/projects/sphere-integration/mcp.sh"
+    "sphere-tasks": {
+      "command": "/abs/path/to/mcp/sphere-tasks/mcp.sh"
     }
   }
 }

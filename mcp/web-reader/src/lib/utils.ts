@@ -29,7 +29,7 @@ export function loadConfig<T extends z.ZodObject<z.ZodRawShape>>(schema: T): z.i
   const result = schema.safeParse(process.env);
   if (!result.success) {
     const missing = result.error.issues.map(i => i.path.join('.')).join(', ');
-    console.error(`[search-mcp] Missing required env vars: ${missing}`);
+    console.error(`[web-reader] Missing required env vars: ${missing}`);
     process.exit(1);
   }
   return result.data;

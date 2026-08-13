@@ -1,4 +1,4 @@
-# Sphere Integration
+# sphere-tasks
 
 **MCP-сервер + CLI** для работы с задачами Bitrix24 (Sphere) на `https://sphere.loodsen.ru`.
 

@@ -39,7 +39,7 @@ export function printSummary(results: TaskWithContext[], failed?: string[]): voi
 
 export function printHelp(): void {
   logger.log(`
-sphere-integration v2.0 — API-only task fetcher for Sphere (Bitrix24)
+sphere-tasks v2.0 — API-only task fetcher for Sphere (Bitrix24)
 
 Commands:
   fetch-my-tasks-api  Fetch my tasks via Bitrix24 REST API

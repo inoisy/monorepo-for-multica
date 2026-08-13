@@ -238,7 +238,7 @@ function buildAllTools() {
 }
 
 const server = new Server(
-  { name: "sphere-integration", version: "2.0.0" },
+  { name: "sphere-tasks", version: "2.0.0" },
   { capabilities: { tools: {} } }
 );
 

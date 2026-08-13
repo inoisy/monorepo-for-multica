@@ -45,6 +45,8 @@ tooling version pinned at the monorepo root. Each project ships its own.
 ## Conventions
 
 - Name a directory after what it does, not after the repo it came from.
+- Package identity follows the directory: `@multica/<project>` in
+  `package.json`, plain `<project>` as the MCP server name clients see.
 - One directory per project, inside a category. No nesting of projects inside
   other projects.
 - Keep project-level `README.md` self-explanatory; the monorepo README only

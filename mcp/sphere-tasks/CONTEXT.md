@@ -1,6 +1,6 @@
 # CONTEXT.md
 
-Проект: sphere-integration
+Проект: sphere-tasks
 Дата: 2026-05-15
 
 ## Назначение

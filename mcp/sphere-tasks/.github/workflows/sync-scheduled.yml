@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout sphere-integration
+      - name: Checkout sphere-tasks
         uses: actions/checkout@v4
 
       - name: Checkout sphere-tasks

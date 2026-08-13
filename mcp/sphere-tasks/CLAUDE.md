@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**sphere-integration** — TypeScript MCP-сервер для работы с задачами Bitrix24 (аналог Jira) на `https://sphere.loodsen.ru`. Разворачивается на сервере для всех сотрудников.
+**sphere-tasks** — TypeScript MCP-сервер для работы с задачами Bitrix24 (аналог Jira) на `https://sphere.loodsen.ru`. Разворачивается на сервере для всех сотрудников.
 
 **Единственный режим доступа:** API mode — Bitrix24 REST API через webhook (`B24_WEBHOOK_URL`). Batch-запросы, никаких браузеров.
 

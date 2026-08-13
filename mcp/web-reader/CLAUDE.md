@@ -1,7 +1,7 @@
 <!-- GSD:project-start source:PROJECT.md -->
 ## Project
 
-**search-mcp**
+**web-reader**
 
 MCP-сервер на TypeScript с инструментами для AI-агентов: веб-поиск (Tavily, Yandex). Разработан для внутренней команды — позволяет агентам (Claude Code, Cursor и др.) отвечать на сложные вопросы после исследования.
 

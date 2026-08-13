@@ -405,4 +405,4 @@ npm run sprint-sync:pull -- --tag "Спринт 49" --dry-run
 
 ## License
 
-Part of sphere-integration project. See main project LICENSE for details.
+Part of the sphere-tasks project. See main project LICENSE for details.

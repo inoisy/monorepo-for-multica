@@ -92,7 +92,7 @@ const pipeline = new WebReaderPipeline(
   extractor,
 );
 
-const server = new McpServer({ name: '@search-mcp/web-reader', version: '0.1.0' });
+const server = new McpServer({ name: 'web-reader', version: '0.1.0' });
 
 server.registerTool(
   'web_reader',
@@ -129,7 +129,7 @@ server.registerTool(
 // Stateless HTTP transport: each request gets a fresh McpServer so concurrent
 // callers don't share a single transport (which crashes after first request).
 function createStatelessServer(): McpServer {
-  const s = new McpServer({ name: '@search-mcp/web-reader', version: '0.1.0' });
+  const s = new McpServer({ name: 'web-reader', version: '0.1.0' });
   s.registerTool(
     'web_reader',
     {
