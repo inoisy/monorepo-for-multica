@@ -1,0 +1,13 @@
+services:
+  web-reader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3075:3000"
+    env_file:
+      - .env
+    environment:
+      PORT: 3000
+    shm_size: 2gb
+    restart: unless-stopped

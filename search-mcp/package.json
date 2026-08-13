@@ -1,0 +1,45 @@
+{
+  "name": "@search-mcp/web-reader",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server that reads web pages and extracts clean markdown content. Handles JavaScript-rendered and anti-bot-protected sites via CloakBrowser (stealth Chromium).",
+  "main": "./dist/index.js",
+  "bin": {
+    "web-reader": "./dist/index.js"
+  },
+  "packageManager": "pnpm@10.5.2",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "smoke": "node scripts/smoke.mjs",
+    "inspect": "mcp-inspector node dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@mozilla/readability": "^0.6.0",
+    "cheerio": "1.0.0",
+    "cloakbrowser": "^0.5.7",
+    "defuddle": "^0.19.2",
+    "dotenv": "17.4.2",
+    "playwright": "1.60.0",
+    "turndown": "7.2.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/inspector": "^0.21.2",
+    "@types/express": "^5.0.6",
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "22.x",
+    "dompurify": "^3.4.11",
+    "express": "^5.2.1",
+    "jsdom": "^29.1.1",
+    "tsx": "4.22.3",
+    "typescript": "~5.8.3",
+    "vitest": "^2.1.9"
+  }
+}

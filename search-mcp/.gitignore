@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Env
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+
+# Browser subprocess temp scripts
+.tmp/
+
+# pnpm
+.pnpm-store/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code (local only — but skills/ + settings.json are tracked)
+.claude/
+
+# Archived packages
+.archive/
+
+# Runtime / tooling artifacts
+/.playwright-mcp/
+/.data/
+/.planning/

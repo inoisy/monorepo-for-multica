@@ -28,6 +28,10 @@ tooling version pinned at the monorepo root. Each project ships its own.
 
 - `sphere-integration/` — MCP server + CLI for Bitrix24 Sphere task
   management (Node.js, TypeScript). See `sphere-integration/README.md`.
+- `search-mcp/` — `@search-mcp/web-reader` MCP server: reads web pages and
+  returns clean markdown, with a Playwright/CloakBrowser fallback for
+  JS-rendered and anti-bot-protected sites (Node.js, TypeScript, pnpm).
+  See `search-mcp/README.md`.
 
 ## Conventions
 
