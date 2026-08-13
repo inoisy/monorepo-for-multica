@@ -1,40 +1,61 @@
 # @search-mcp/web-reader
 
-MCP server tool that reads web pages and extracts clean markdown content. Handles JavaScript-rendered pages (React, Vue, Angular) via Playwright fallback.
+MCP server with a single tool — `web_reader` — that fetches a web page and
+returns clean markdown. Pages that need JavaScript, or that answer an ordinary
+HTTP client with an anti-bot interstitial, are re-fetched through CloakBrowser
+(patched stealth Chromium) in a throwaway subprocess.
 
-## Installation
+The package is `private: true` and is not published to npm. It runs from this
+checkout, or from the Docker image built here.
 
-### Using npx (recommended)
+## Install
 
 ```bash
-npx -y @search-mcp/web-reader
+pnpm install          # pnpm 10.5.2, Node 22+
+pnpm run build        # tsc -> dist/
+npx cloakbrowser install   # pre-fetch the stealth Chromium binary (optional; it self-downloads on first render)
 ```
 
-### Claude Desktop Configuration
+## Run
 
-Add to your Claude Desktop MCP config:
+Two transports; stdio is the default, `--http` switches to Streamable HTTP.
+
+```bash
+node dist/index.js            # stdio
+node dist/index.js --http     # POST /message on $PORT (default 3000)
+pnpm run dev                  # tsx watch, stdio
+```
+
+Docker (`docker-compose.yml`) builds on the Playwright base image and runs the
+HTTP transport, host port `3075` → container `3000`:
+
+```bash
+docker compose up --build
+```
+
+### Claude Code / Cursor config
+
+stdio, pointing at the built entry point:
 
 ```json
 {
   "mcpServers": {
     "web-reader": {
-      "command": "npx",
-      "args": ["-y", "@search-mcp/web-reader"]
+      "command": "node",
+      "args": ["/abs/path/to/search-mcp/dist/index.js"]
     }
   }
 }
 ```
 
-### Cursor Configuration
-
-Add to your Cursor MCP settings:
+HTTP, against a running container:
 
 ```json
 {
   "mcpServers": {
     "web-reader": {
-      "command": "npx",
-      "args": ["-y", "@search-mcp/web-reader"]
+      "type": "http",
+      "url": "http://localhost:3075/message"
     }
   }
 }
@@ -42,232 +63,125 @@ Add to your Cursor MCP settings:
 
 ## Usage
 
-The `web_reader` tool fetches any HTML page and returns clean markdown content.
-
 ### Parameters
 
 - **url** (required): URL to read. Must be HTTP or HTTPS.
-- **max_chars** (optional): Maximum characters to return. Default: 20,000. Range: 1-100,000.
-
-### Example
+- **max_chars** (optional): Maximum characters to return. Default: 20,000.
+  Range: 1–1,000,000. Ignored in `passthrough` extractor mode, which always
+  returns up to 1,000,000 chars so a downstream extractor gets the full payload.
 
 ```
 web_reader("https://example.com")
-```
-
-With custom character limit:
-
-```
 web_reader("https://example.com", 50000)
 ```
 
-## Features
+## How it works
 
-- **Fetch any HTML page**: Works with static and dynamic websites
-- **Content cleaning**: Strips navigation, footers, ads, and scripts
-- **Markdown conversion**: Converts HTML to clean markdown format
-- **JavaScript rendering**: Auto-detects JS-rendered pages (React, Vue, Angular)
-- **Playwright fallback**: Spawns headless Chromium for SPA sites
-- **Content-type guards**: Rejects PDF, images, and non-HTML content
-- **Configurable output**: Truncates to your specified character limit
-- **Error clarity**: Returns descriptive error messages for all failure modes
-
-## How It Works
-
-1. **Fetch**: Makes HTTP request to URL
-2. **Validate**: Checks Content-Type header (rejects PDF, images, etc.)
-3. **Detect JS-rendered**: Checks HTML length and framework markers
-4. **Render if needed**: Hands the URL to the renderer chain (`nodriver`, then `cloakbrowser`)
-5. **Wait for the real page**: Polls the live DOM until it is rich or has stopped changing, so anti-bot interstitials are never mistaken for content
-6. **Parse**: Extracts the main content (defuddle by default)
-7. **Convert**: Transforms HTML to markdown
-8. **Truncate**: Limits output to max_chars
-
-### Renderer chain
-
-Engines are tried in order until one returns a page that is not an interstitial:
-
-- an engine that errors, gets stuck on a challenge, or hits a refusal page hands over to the next one
-- if no engine gets a clean page, the largest page seen is returned rather than nothing
-- only a total failure raises, and the error lists what every engine ran into
+1. **Fetch** — plain `fetch()` with a desktop UA and `ru-RU` first in
+   `Accept-Language` (RU sites serve foreign clients a different page).
+2. **Guard content type** — PDF, images, and any non-`text/html` type are
+   rejected outright.
+3. **Decide whether to render** — the HTTP response is handed to the browser
+   when visible text is under 200 chars, when the body matches a known block
+   page, when it looks like a vendor challenge, when the status is
+   render-worthy (401/403/429/5xx and friends), or when the request failed at
+   the transport level.
+4. **Render** — CloakBrowser loads the URL in a subprocess that never outlives
+   the request, polling the live DOM instead of grabbing `page.content()` once
+   navigation settles.
+5. **Re-check** — a Chrome navigation error page or an anti-bot refusal is
+   turned into an explicit error rather than extracted into tidy markdown.
+6. **Extract** — defuddle by default, with a link-feed harvest and Readability
+   as internal fallbacks.
+7. **Sanitize + truncate** — data URIs and filler runs are stripped, junk-only
+   output is rejected, then the text is cut to `max_chars`.
 
 ### Anti-bot handling
 
-The renderers do not grab `page.content()` as soon as navigation settles. Qrator,
-Cloudflare and DDoS-Guard all answer first with a small stub whose JavaScript
-runs a check and then swaps in the real document — reading too early returns a
-260-byte shell. Instead both renderers poll and stop on the first of:
+Qrator, Cloudflare and DDoS-Guard answer first with a small stub whose
+JavaScript runs a check and then swaps in the real document — reading too early
+returns a ~260-byte shell. The renderer polls and stops on the first of:
 
 - **rich page** — enough visible text and HTML, or
-- **stable page** — the DOM stopped changing (this is what keeps genuinely small pages fast), or
-- **refusal** — a block page that persisted through the grace period, which fails over to the next engine.
+- **stable page** — the DOM stopped changing (this is what keeps genuinely
+  small pages fast), or
+- **refusal** — a block page that persisted through the grace period, which is
+  reported as an error instead of being returned as content.
+
+Per-host rules cover the sites that need different launch options; `*.avito.ru`
+and `*.wildberries.ru` ship as built-in defaults (`humanPreset:careful`,
+`locale:ru-RU`). No fingerprint spoofing is injected via `addInitScript` —
+CloakBrowser's C++ patches already cover it, and JS getters layered on top are
+themselves a detection signal.
 
 ## Limitations
 
-- **HTML only**: Supports HTML pages only. Does NOT support:
-  - PDF documents
-  - Images (PNG, JPG, GIF, etc.)
-  - JSON APIs
-  - Video or audio files
-- **Timeout**: `WEB_RENDER_TIMEOUT_MS` per engine (default 25s). Two engines stay under the 60s MCP client timeout.
-- **Read-only**: Cannot fill forms, click buttons, or authenticate
-- **Public content**: Cannot access password-protected pages
+- **HTML only** — no PDF, images, JSON APIs, video or audio.
+- **Timeout** — `WEB_RENDER_TIMEOUT_MS`, default 25s, must stay under the 60s
+  MCP client timeout.
+- **Read-only** — cannot fill forms, click through flows, or authenticate.
+- **Public content** — no password-protected pages.
 
-## Examples
+## Errors
 
-### Static HTML Page
+All failures come back as `isError: true` with a descriptive message:
 
-```
-web_reader("https://example.com")
-```
-
-Returns markdown content from static HTML.
-
-### JavaScript-Rendered Page (React, Vue, Angular)
-
-```
-web_reader("https://react.dev")
-```
-
-Auto-detects JS rendering, launches Playwright, returns rendered markdown.
-
-### With Custom Character Limit
-
-```
-web_reader("https://blog.example.com/long-post", 50000)
-```
-
-Returns up to 50,000 characters instead of default 20,000.
-
-## Error Handling
-
-All errors return `isError: true` with descriptive messages:
-
-### Unsupported Content Type
-
-```
-web_reader("https://example.com/doc.pdf")
-```
-
-Returns: `Unsupported content type: application/pdf. web-reader supports HTML pages only.`
-
-```
-web_reader("https://example.com/image.png")
-```
-
-Returns: `Unsupported content type: image/png. web-reader supports HTML pages only.`
-
-### HTTP Errors
-
-```
-web_reader("https://example.com/notfound")
-```
-
-Returns: `HTTP 404: Not Found`
-
-```
-web_reader("https://example.com/internal-error")
-```
-
-Returns: `HTTP 500: Internal Server Error`
-
-### Invalid URL
-
-```
-web_reader("not-a-url")
-```
-
-Returns: `Invalid URL: not-a-url. Must be HTTP or HTTPS.`
-
-### Timeout (JavaScript-rendered pages)
-
-```
-web_reader("https://slow-spa.example.com")
-```
-
-Returns the reason from every engine that was tried:
-
-```
-Failed to render https://slow-spa.example.com. Renderers tried:
-  - nodriver: timed out after 25000ms
-  - cloakbrowser: https://slow-spa.example.com refused the request (anti-bot block page)
-```
-
-### Network Errors
-
-```
-web_reader("https://nonexistent-domain-12345.com")
-```
-
-Returns: `Failed to fetch https://nonexistent-domain-12345.com: getaddrinfo ENOTFOUND`
-
-## Architecture
-
-- **fetcher.ts**: HTTP fetch with content-type validation, block-page and render detection
-- **challenge.ts**: anti-bot marker lists, page verdicts, and the HTTP statuses worth re-trying in a browser
-- **render-script.ts**: the wait policy plus the in-page verdict function, generated once for both engines
-- **subprocess.ts**: spawn/timeout/cleanup plumbing shared by the renderers — no browser outlives its request
-- **playwright-subprocess.ts**: CloakBrowser (patched Chromium) renderer
-- **nodriver-subprocess.ts**: Python + nodriver renderer, raw CDP
-- **python.ts**: finds an interpreter that can `import nodriver` (venv first, system Python last)
-- **renderer-chain.ts**: the fallback chain
-- **pipeline.ts**: fetch -> render -> extract
-- **index.ts**: MCP server and tool handler
-
-## Renderers
-
-| Renderer | Engine | Strengths |
-|----------|--------|-----------|
-| `nodriver` (default) | System Chrome via raw CDP | Python subprocess driving Chrome with no Playwright shim, so it does not leak `Runtime.enable` / WebSocket serialization patterns. Best against DataDome, DDoS-Guard, Cloudflare Turnstile. |
-| `cloakbrowser` (default fallback) | Chromium 145 + C++ fingerprint patches | Best against Qrator (auchan.ru, many RU retailers). Binary auto-downloads on first launch; pre-fetch it with `npx cloakbrowser install`. |
-
-Order is set by `WEB_RENDERER` (primary) and `WEB_RENDERER_FALLBACK` (comma
-separated, `none` to disable). No fingerprint spoofing is injected into
-CloakBrowser via `addInitScript` — its C++ patches already cover this, and JS
-getters layered on top are themselves a detection signal (Qrator refuses them).
-
-### Setting up nodriver
-
-nodriver needs a Python interpreter with the `nodriver` package and a system
-Chrome. The interpreter is auto-detected in this order: `NODRIVER_PYTHON`,
-`<repo>/.venv-nodriver/bin/python`, `.venv-nodriver` next to the package or cwd,
-then `python3.13` … `python3`.
-
-```bash
-python3 -m venv .venv-nodriver
-.venv-nodriver/bin/pip install nodriver
-```
-
-The server logs which interpreter it picked at startup, and warns loudly if none
-of them can `import nodriver` — the chain then runs on the fallback engine alone.
+| Case | Message |
+|------|---------|
+| Bad URL | `Invalid URL format: not-a-url` / `... Only HTTP and HTTPS URLs are supported.` |
+| Non-HTML | `Unsupported content type: PDF` / `Unsupported content type: image/png` |
+| HTTP error (non render-worthy status) | `HTTP 404: Not Found` |
+| Browser navigation error | `Could not load <url> — the browser hit a navigation error (<code>). ...` |
+| Anti-bot refusal | `<url> refused the request — the response was an anti-bot block page, not the site. ...` |
+| Nothing extractable | `No readable content at <url> — ...` |
 
 ## Configuration
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `WEB_RENDERER` | `nodriver` | Primary render engine |
-| `WEB_RENDERER_FALLBACK` | `cloakbrowser` | Comma-separated engines tried after the primary |
-| `WEB_RENDER_TIMEOUT_MS` | `25000` | Wall clock per engine |
-| `WEB_NODRIVER_HEADLESS` | `1` | Set `0` to run nodriver headful (some anti-bot vendors flag headless) |
-| `NODRIVER_PYTHON` | auto-detected | Explicit Python interpreter for nodriver |
+| `PORT` | `3000` | HTTP transport port (`--http` only) |
 | `WEB_EXTRACTOR` | `defuddle` | `defuddle`, `readability`, `passthrough` |
-| `WEB_DEBUG` | off | `1` to log every poll of every renderer to stderr |
+| `WEB_RENDER_TIMEOUT_MS` | `25000` | Wall clock for one render |
+| `WEB_PROXY_URL` | — | SOCKS5/HTTP proxy; unlocks RU geo-gated sites |
+| `WEB_GEOIP` | `0` | Derive timezone/locale from the proxy IP |
+| `WEB_USER_DATA_DIR` | — | Persistent browser profile (cookies survive requests) |
+| `WEB_HUMANIZE` | `1` | Humanized mouse/keyboard/scroll |
+| `WEB_HUMAN_PRESET` | `default` | `default` (fast) or `careful` (slower, more human-like) |
+| `WEB_LOCALE` | auto | BCP 47 locale; empty derives it from the URL's TLD |
+| `WEB_HOST_RULES` | — | Per-host overrides, `domain.tld=key:value,...;other.tld=...` |
+| `WEB_BLOCK_NAV_HOSTS` | `sso.passport.yandex.ru` | Top-level navigations the renderer refuses; empty follows every redirect |
+| `WEB_VIEWPORT_WIDTH` / `WEB_VIEWPORT_HEIGHT` | `1920` / `1080` | Browser viewport |
+| `WEB_RELEASE_CHANNEL` | `stable` | `preview` gets newer fingerprint patches earlier |
+| `WEB_DEBUG` | off | `1` logs every renderer poll to stderr |
 
+See `.env.example` for the annotated version.
+
+## Architecture
+
+| File | Role |
+|------|------|
+| `index.ts` | MCP server, env schema, tool handler, stdio/HTTP transports |
+| `lib/fetcher.ts` | HTTP fetch, charset decode, content-type guard, render decision |
+| `lib/challenge.ts` | Anti-bot markers, page verdicts, render-worthy statuses |
+| `lib/render-script.ts` | Wait policy and the in-page verdict function |
+| `lib/subprocess.ts` | Spawn/timeout/cleanup plumbing; no browser outlives its request |
+| `lib/playwright-subprocess.ts` | CloakBrowser renderer |
+| `lib/host-rules.ts` | Per-host launch-option overrides |
+| `lib/extractor-defuddle.ts` | Default extractor, with feed/Readability fallbacks |
+| `lib/extractor-feed.ts` | Link-feed harvest for index pages |
+| `lib/parser.ts` | Readability extractor |
+| `lib/sanitize.ts` | Markdown cleanup and junk detection |
+| `lib/pipeline.ts` | fetch → render → extract → sanitize |
+| `lib/renderer-chain.ts` | Multi-engine fallback chain; unused since the chain collapsed to CloakBrowser alone |
 
 ## Development
 
 ```bash
-# Install dependencies
-pnpm install
-
-# Build
-npm run build
-
-# Type check
-npm run typecheck
-
-# Development mode
-npm run dev
+pnpm run typecheck
+pnpm run build
+pnpm test          # vitest, 110 tests in 8 files (suite list lives in vitest.config.ts)
+pnpm run smoke     # scripts/smoke.mjs against live sites
+pnpm run inspect   # MCP inspector against dist/index.js
 ```
 
 ## License
