@@ -23,9 +23,9 @@ projects, one directory per project:
     README.md
 ```
 
-Everything here is MCP servers so far, so `mcp/` is the only category. New
-kinds of work get their own top-level directory (`services/`, `libs/`, …)
-rather than landing next to the MCP servers.
+Categories so far are `mcp/` and `skills/`. New kinds of work get their own
+top-level directory (`services/`, `libs/`, …) rather than landing next to an
+existing category.
 
 Projects are independent — there is no shared build graph, lockfile, or
 tooling version pinned at the monorepo root. Each project ships its own.
@@ -42,9 +42,18 @@ tooling version pinned at the monorepo root. Each project ships its own.
   (`sphere.loodsen.ru`) task management, sprint sync, and webhooks.
   Node.js, TypeScript, npm. See `mcp/sphere-tasks/README.md`.
 
+### `skills/` — agent skills
+
+- `skills/agents-init/` — builds a project's `AGENTS.md` from repository recon
+  and audits an existing one. Markdown only, no build step; installed by
+  symlinking into `~/.claude/skills/` or copying into a project's
+  `.claude/skills/`. See `skills/agents-init/README.md`.
+
 ## Conventions
 
 - Name a directory after what it does, not after the repo it came from.
+- A project without a build step (a skill, a prompt pack) still gets its own
+  directory and `README.md`, same as a service.
 - Package identity follows the directory: unscoped `<project>` in
   `package.json`, and the same `<project>` as the MCP server name clients see.
 - One directory per project, inside a category. No nesting of projects inside
