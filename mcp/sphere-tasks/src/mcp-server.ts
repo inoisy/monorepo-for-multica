@@ -4,7 +4,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { b24AddComment, b24UpdateComment, b24DeleteComment, b24LogTime, b24GetTimeEntries, b24GetTaskTimeTotals, b24DeleteTimeEntry, b24UpdateEstimate, b24UpdateStatus, b24UpdateStage, type B24ElapsedRaw } from "./api/b24-client.js";
+import { b24AddComment, b24CreateTask, b24UpdateComment, b24DeleteComment, b24LogTime, b24GetTimeEntries, b24GetTaskTimeTotals, b24DeleteTimeEntry, b24UpdateEstimate, b24UpdateStatus, b24UpdateStage, type B24ElapsedRaw } from "./api/b24-client.js";
 import { fetchMyTasksViaApi, fetchTasksBatch } from "./api/task-fetcher-api.js";
 import { formatSeconds } from "./utils/format.js";
 import { ok, err, isApiConfigured, type McpResult } from "./mcp/utils.js";
@@ -146,6 +146,24 @@ const WRITE_TOOLS = [
     },
   },
   {
+    name: "create_task",
+    description: "Create a new Sphere task. Requires MCP_WRITE_ENABLED=true. Set parent_task_id to make it a subtask of a story.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Task title, follow existing conventions (e.g. '[FE] ...', '[BE] ...', '[BUG] ...')" },
+        description: { type: "string", description: "Task description (BBCode supported)" },
+        parent_task_id: { type: "string", description: "Parent task ID — makes this a subtask" },
+        group_id: { type: "string", description: "Bitrix24 group ID (e.g. '50' for EPUS)" },
+        responsible_id: { type: "string", description: "Responsible user ID (default: webhook user)" },
+        task_type_id: { type: "string", description: `UF_TASK_TYPE enum ID. Required by this Bitrix install. Known values: 344 story, 346 dev task, 347 BA?, 348 bug. Default: 346` },
+        priority_id: { type: "string", description: "UF_TASK_PRIORITY enum ID. Required. Default: 373 (normal)" },
+        work_type_id: { type: "string", description: "UF_TASK_WORK_TYPE enum ID. Default: 358" },
+      },
+      required: ["title"],
+    },
+  },
+  {
     name: "edit_comment",
     description: "Edit an existing comment. Requires MCP_WRITE_ENABLED=true. Only author can edit.",
     inputSchema: {
@@ -257,6 +275,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // Write tools — guarded individually
   if (name === "add_comment") return handleAddComment(args);
+  if (name === "create_task") return handleCreateTask(args);
   if (name === "edit_comment") return handleEditComment(args);
   if (name === "delete_comment") return handleDeleteComment(args);
   if (name === "log_time") return handleLogTime(args);
@@ -478,6 +497,30 @@ async function handleAddComment(args: Record<string, unknown> | undefined): Prom
     return ok(`Comment added to task ${taskId} (ID: ${commentId})`);
   } catch (err_: unknown) {
     return err(`Failed to add comment: ${(err_ as Error).message}`);
+  }
+}
+
+async function handleCreateTask(args: Record<string, unknown> | undefined): Promise<McpResult> {
+  assertWriteEnabled();
+  const title = args?.title as string;
+  if (!title) return err("'title' is required");
+  const fields: Record<string, unknown> = {
+    TITLE: title,
+    // этот Битрикс требует обязательные юзер-поля «Тип задачи» и «Приоритет» — без них add падает с ERROR_CORE
+    UF_TASK_TYPE: (args?.task_type_id as string) ?? "346",
+    UF_TASK_PRIORITY: (args?.priority_id as string) ?? "373",
+    UF_TASK_WORK_TYPE: (args?.work_type_id as string) ?? "358",
+  };
+  if (args?.description) fields.DESCRIPTION = args.description;
+  if (args?.parent_task_id) fields.PARENT_ID = args.parent_task_id;
+  if (args?.group_id) fields.GROUP_ID = args.group_id;
+  if (args?.responsible_id) fields.RESPONSIBLE_ID = args.responsible_id;
+  try {
+    const created = await b24CreateTask(fields);
+    const base = process.env.SPHERE_BASE_URL || "https://sphere.loodsen.ru";
+    return ok(`Task created: ID ${created.id} — ${base}/company/personal/user/${process.env.B24_USER_ID ?? ""}/tasks/task/view/${created.id}/`);
+  } catch (err_: unknown) {
+    return err(`Failed to create task: ${(err_ as Error).message}`);
   }
 }
 

@@ -155,6 +155,10 @@ export async function b24AddComment(taskId: string, message: string): Promise<st
   });
 }
 
+export async function b24CreateTask(fields: Record<string, unknown>): Promise<{ id: string }> {
+  return b24Call<{ id: string }>("tasks.task.add", { fields });
+}
+
 export async function b24UpdateComment(taskId: string, commentId: string, message: string): Promise<string> {
   return b24Call<string>("task.commentitem.update", {
     TASKID: taskId,
