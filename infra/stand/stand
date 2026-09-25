@@ -1,0 +1,360 @@
+#!/bin/bash
+# stand — стенды epus/frontend на ветку: собрать, поднять, показать, убрать.
+# Агенты зовут через sudo (sudoers разрешает только этот скрипт), docker им не
+# отдаётся. Сборка — в одноразовом контейнере node своим сценарием, Dockerfile
+# из ветки не используется: ветка не должна управлять тем, что делает root.
+set -euo pipefail
+umask 022
+
+ROOT=/var/lib/stand
+CONF=/etc/stand
+STANDS=$ROOT/stands
+MIRROR=$ROOT/git/frontend.git
+REPO_URL=git@git01.loodsen.ru:gaz-group/epus/frontend.git
+GIT_SSH="ssh -i /home/agents/.ssh/id_ed25519 -o UserKnownHostsFile=/home/agents/.ssh/known_hosts -o BatchMode=yes"
+NODE_IMAGE=docker-base.loodsen.ru/library/node:24.11.0
+DOMAIN=stand.yakutov.com
+PORT_MIN=9100
+PORT_MAX=9139
+MAX_STANDS=8
+TTL_HOURS=48
+BUILD_MEM=5g
+RUN_MEM=768m
+APP_UID=20000
+DEFAULT_SITE=azgaz
+
+die() { echo "stand: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+stand — стенды epus/frontend (фронт на ветку, API — dev)
+
+  stand up <имя> --ref <ветка|sha> [--env dev|stage] [--site <id>] [--issue <KEY>] [--wait]
+  stand up <имя> --path <каталог>  [--env dev|stage] [--site <id>] [--issue <KEY>] [--wait]
+  stand wait <имя> [секунд]       дождаться окончания сборки (по умолчанию 900)
+  stand status <имя>              состояние и хвост лога сборки
+  stand logs <имя> [строк]        логи работающего стенда (или сборки)
+  stand list                      все стенды
+  stand down <имя>                остановить и удалить
+
+<имя> — ключ задачи (stt-12) или короткое имя: [a-z0-9-], до 40 символов.
+--ref  — ветка или коммит из git01 (ветку сначала запушить).
+--path — рабочая копия на сервере, берётся как есть, с незакоммиченным.
+--env  — чей бэк: dev (по умолчанию) или stage. Запекается в сборку —
+         смена --env у того же стенда = пересборка.
+--site — сайт (NUXT_PUBLIC_SITE_CONFIG_ID), по умолчанию azgaz.
+Стенд живёт 48 часов с последнего up или до закрытия задачи.
+EOF
+}
+
+# ---------- проверки ввода ----------
+
+valid_name() {
+  [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || die "имя '$1': только [a-z0-9-], до 40 символов"
+  [[ $1 != auth && $1 != www ]] || die "имя '$1' зарезервировано"
+}
+valid_ref() {
+  [[ $1 =~ ^[A-Za-z0-9._/-]{1,200}$ && $1 != -* && $1 != *..* ]] || die "ref '$1' недопустим"
+}
+valid_site() { [[ $1 =~ ^[a-z0-9-]{1,40}$ ]] || die "site '$1' недопустим"; }
+valid_issue() { [[ $1 =~ ^[A-Z][A-Z0-9]{0,9}-[0-9]{1,7}$ ]] || die "issue '$1': ожидается вида STT-12"; }
+
+# ---------- реестр ----------
+
+dir_of() { echo "$STANDS/$1"; }
+
+meta_get() { # имя ключ
+  local f; f="$(dir_of "$1")/meta.env"
+  [[ -f $f ]] || return 0
+  sed -n "s/^$2=//p" "$f" | tail -1
+}
+
+meta_set() { # имя ключ значение — значения без переводов строк и '='-ловушек
+  local f tmp; f="$(dir_of "$1")/meta.env"; tmp="$f.tmp.$$"
+  [[ $3 != *$'\n'* ]] || die "meta: перевод строки в значении"
+  { [[ -f $f ]] && grep -v "^$2=" "$f" || true; echo "$2=$3"; } >"$tmp"
+  chmod 644 "$tmp"; mv "$tmp" "$f"
+}
+
+exists() { [[ -f "$(dir_of "$1")/meta.env" ]]; }
+need() { exists "$1" || die "стенда '$1' нет (stand list)"; }
+
+active_count_except() { # сколько стендов building/running, кроме указанного
+  local n=0 d name st
+  for d in "$STANDS"/*/; do
+    [[ -d $d ]] || continue
+    name=$(basename "$d"); [[ $name == "$1" ]] && continue
+    st=$(meta_get "$name" status)
+    [[ $st == building || $st == running ]] && n=$((n + 1))
+  done
+  echo "$n"
+}
+
+alloc_port() {
+  local p used d
+  used=$(cat "$STANDS"/*/meta.env 2>/dev/null | sed -n 's/^port=//p' || true)
+  for ((p = PORT_MIN; p <= PORT_MAX; p++)); do
+    grep -qx "$p" <<<"$used" && continue
+    ss -Hltn "sport = :$p" | grep -q . && continue
+    echo "$p"; return
+  done
+  die "нет свободных портов $PORT_MIN-$PORT_MAX"
+}
+
+# ---------- git ----------
+
+mirror_fetch() {
+  mkdir -p "$(dirname "$MIRROR")"
+  exec 8>"$ROOT/git.lock"; flock 8
+  if [[ ! -d $MIRROR ]]; then
+    GIT_SSH_COMMAND=$GIT_SSH git clone -q --mirror "$REPO_URL" "$MIRROR"
+  else
+    GIT_SSH_COMMAND=$GIT_SSH git -C "$MIRROR" fetch -q --prune origin '+refs/heads/*:refs/heads/*'
+  fi
+  flock -u 8
+}
+
+resolve_sha() { # ref → полный sha или пусто
+  git -C "$MIRROR" rev-parse -q --verify "refs/heads/$1^{commit}" 2>/dev/null ||
+    git -C "$MIRROR" rev-parse -q --verify "$1^{commit}" 2>/dev/null || true
+}
+
+# ---------- команды ----------
+
+cmd_up() {
+  local name="" ref="" path="" site="$DEFAULT_SITE" env=dev issue="" wait=0
+  name=${1:-}; [[ -n $name ]] || { usage; exit 2; }; shift
+  name=${name,,}; valid_name "$name"
+  while (($#)); do
+    case $1 in
+      --ref) ref=${2:-}; shift 2 ;;
+      --path) path=${2:-}; shift 2 ;;
+      --site) site=${2:-}; shift 2 ;;
+      --env) env=${2:-}; shift 2 ;;
+      --issue) issue=${2:-}; shift 2 ;;
+      --wait) wait=1; shift ;;
+      *) die "неизвестный аргумент '$1'" ;;
+    esac
+  done
+  [[ -n $ref || -n $path ]] || die "нужен --ref <ветка> или --path <каталог>"
+  [[ -z $ref || -z $path ]] || die "либо --ref, либо --path"
+  valid_site "$site"
+  [[ $env == dev || $env == stage ]] || die "--env: dev или stage"
+  if [[ -z $issue && $name =~ ^[a-z][a-z0-9]{0,9}-[0-9]+$ ]]; then issue=${name^^}; fi
+  [[ -z $issue ]] || valid_issue "$issue"
+
+  local d; d=$(dir_of "$name")
+  if exists "$name" && [[ $(meta_get "$name" status) == building ]]; then
+    die "'$name' уже собирается — stand wait $name"
+  fi
+  (($(active_count_except "$name") < MAX_STANDS)) ||
+    die "уже $MAX_STANDS стендов — уберите лишние (stand list / stand down)"
+
+  local sha="" src_desc
+  if [[ -n $ref ]]; then
+    valid_ref "$ref"
+    mirror_fetch
+    sha=$(resolve_sha "$ref")
+    [[ -n $sha ]] || die "в git01 нет ветки или коммита '$ref' (ветку надо запушить)"
+    src_desc="$ref@${sha:0:10}"
+  else
+    [[ $path == /* ]] || die "--path: нужен абсолютный путь"
+    path=$(realpath -e -- "$path") || die "--path: каталога нет"
+    [[ -f $path/package.json && -f $path/nuxt.config.ts ]] || die "--path: это не epus/frontend"
+    src_desc="path:$path"
+  fi
+
+  local port; port=$(meta_get "$name" port); [[ -n $port ]] || port=$(alloc_port)
+  mkdir -p "$d"; chmod 755 "$d"
+  rm -rf "$d/src"; mkdir -p "$d/src"
+
+  if [[ -n $path ]]; then
+    # Копируем правами того, кто позвал: root не должен читать за агента чужое.
+    local who=${SUDO_USER:-root}
+    sudo -u "$who" tar -C "$path" --exclude=./node_modules --exclude=./.nuxt \
+      --exclude=./.output --exclude=./.git -cf - . | tar -C "$d/src" -xf - ||
+      die "--path: не удалось скопировать (нет прав у $who?)"
+  fi
+
+  local now; now=$(date +%s)
+  meta_set "$name" name "$name"
+  meta_set "$name" status building
+  meta_set "$name" source "$src_desc"
+  meta_set "$name" ref "${ref:-}"
+  meta_set "$name" sha "$sha"
+  meta_set "$name" site "$site"
+  meta_set "$name" env "$env"
+  meta_set "$name" issue "$issue"
+  meta_set "$name" port "$port"
+  meta_set "$name" owner "${MULTICA_AGENT_NAME:-${SUDO_USER:-root}}"
+  meta_set "$name" task "${MULTICA_TASK_ID:-}"
+  meta_set "$name" updated "$now"
+  meta_set "$name" expires $((now + TTL_HOURS * 3600))
+  meta_set "$name" error ""
+
+  : >"$d/build.log"
+  setsid nohup "$0" _build "$name" >>"$d/build.log" 2>&1 </dev/null &
+  meta_set "$name" build_pid "$!"
+
+  echo "стенд $name: сборка запущена ($src_desc, бэк $env, сайт $site)"
+  echo "  прогресс:  stand status $name   ждать: stand wait $name"
+  echo "  адрес:     https://$name.$DOMAIN  (изнутри сервера: http://127.0.0.1:$port)"
+  if ((wait)); then cmd_wait "$name"; fi
+}
+
+cmd__build() { # внутренняя: сборка и запуск, лог — в build.log
+  local name=$1 d; d=$(dir_of "$name")
+  local sha site port env
+  sha=$(meta_get "$name" sha); site=$(meta_get "$name" site); port=$(meta_get "$name" port)
+  env=$(meta_get "$name" env); env=${env:-dev}
+  fail() { meta_set "$name" status failed; meta_set "$name" error "$1"; echo "ОШИБКА: $1"; exit 1; }
+  trap 'fail "сборка прервана (строка $LINENO)"' ERR
+
+  echo "[$(date +%T)] очередь сборки (собирается по одному стенду)"
+  exec 9>"$ROOT/build.lock"; flock 9
+  echo "[$(date +%T)] сборка началась"
+
+  if [[ -n $sha ]]; then
+    git -C "$MIRROR" archive "$sha" | tar -C "$d/src" -xf -
+  fi
+  install -m 644 "$CONF/frontend.$env.build.env" "$d/src/.env"
+  chown -R "$APP_UID:$APP_UID" "$d/src"
+
+  docker rm -f "stand-build-$name" >/dev/null 2>&1 || true
+  if ! docker run --rm --name "stand-build-$name" \
+    --memory "$BUILD_MEM" --cpus 4 --user "$APP_UID:$APP_UID" \
+    --env-file "$CONF/frontend.$env.build.env" \
+    -e HOME=/tmp/home -e COREPACK_HOME=/cache/corepack -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    -e npm_config_store_dir=/cache/pnpm-store -e pnpm_config_store_dir=/cache/pnpm-store \
+    -e NODE_OPTIONS=--max-old-space-size=4096 -e CI=true \
+    -v "$d/src:/src" -v stand-cache:/cache -w /src \
+    "$NODE_IMAGE" sh -ec '
+      mkdir -p /tmp/bin && corepack enable --install-directory /tmp/bin && export PATH=/tmp/bin:$PATH
+      pnpm install --frozen-lockfile
+      pnpm run postinstall
+      pnpm run build'; then
+    fail "сборка упала — stand status $name"
+  fi
+  [[ -f $d/src/.output/server/index.mjs ]] || fail "после сборки нет .output/server/index.mjs"
+
+  rm -rf "$d/output"; mv "$d/src/.output" "$d/output"; rm -rf "$d/src"
+  echo "[$(date +%T)] сборка готова, запуск"
+  flock -u 9
+
+  # Картинки dev-бэка в частной сети — отдаём их через сам стенд (/upload
+  # проксирует Caddy); stage-бэк публичный, его адрес остаётся как есть.
+  local img=()
+  [[ $env == dev ]] && img=(-e "NUXT_PUBLIC_IMG_BASE_URL=https://$name.$DOMAIN")
+
+  docker rm -f "stand-$name" >/dev/null 2>&1 || true
+  docker run -d --name "stand-$name" --restart unless-stopped \
+    --label stand="$name" --memory "$RUN_MEM" --cpus 1 --user "$APP_UID:$APP_UID" \
+    --read-only --tmpfs /tmp \
+    --env-file "$CONF/frontend.$env.run.env" -e NUXT_PUBLIC_SITE_CONFIG_ID="$site" "${img[@]}" \
+    -p "127.0.0.1:$port:3000" -v "$d/output:/app/.output:ro" -w /app \
+    "$NODE_IMAGE" node .output/server/index.mjs >/dev/null
+
+  local i code=000
+  for ((i = 0; i < 60; i++)); do
+    code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$port/" || true)
+    [[ $code =~ ^[23] ]] && break
+    sleep 2
+  done
+  if [[ ! $code =~ ^[23] ]]; then
+    docker logs --tail 40 "stand-$name" 2>&1 || true
+    fail "стенд не ответил (последний HTTP $code) — stand logs $name"
+  fi
+  trap - ERR
+  meta_set "$name" status running
+  meta_set "$name" build_pid ""
+  echo "[$(date +%T)] готово: https://$name.$DOMAIN (HTTP $code)"
+}
+
+cmd_wait() {
+  local name=${1:-} limit=${2:-900} st i
+  [[ -n $name ]] || die "stand wait <имя> [секунд]"; name=${name,,}; valid_name "$name"; need "$name"
+  [[ $limit =~ ^[0-9]{1,5}$ ]] || die "секунды — число"
+  for ((i = 0; i <= limit; i += 5)); do
+    st=$(meta_get "$name" status)
+    [[ $st == building ]] || break
+    sleep 5
+  done
+  cmd_status "$name"
+  [[ $st == running ]]
+}
+
+cmd_status() {
+  local name=${1:-}; [[ -n $name ]] || die "stand status <имя>"; name=${name,,}; valid_name "$name"; need "$name"
+  local port; port=$(meta_get "$name" port)
+  printf '%-9s %s\n' статус "$(meta_get "$name" status)" источник "$(meta_get "$name" source)" \
+    бэк "$(meta_get "$name" env)" сайт "$(meta_get "$name" site)" задача "$(meta_get "$name" issue)" \
+    адрес "https://$name.$DOMAIN" локально "http://127.0.0.1:$port" \
+    до "$(date -d "@$(meta_get "$name" expires)" '+%F %R')"
+  local err; err=$(meta_get "$name" error); [[ -z $err ]] || echo "ошибка    $err"
+  echo "--- лог сборки (хвост) ---"
+  tail -n 25 "$(dir_of "$name")/build.log" 2>/dev/null || true
+}
+
+cmd_logs() {
+  local name=${1:-} n=${2:-100}; [[ -n $name ]] || die "stand logs <имя> [строк]"
+  name=${name,,}; valid_name "$name"; need "$name"; [[ $n =~ ^[0-9]{1,5}$ ]] || die "строк — число"
+  if docker inspect "stand-$name" >/dev/null 2>&1; then
+    docker logs --tail "$n" "stand-$name" 2>&1
+  else
+    tail -n "$n" "$(dir_of "$name")/build.log"
+  fi
+}
+
+cmd_list() {
+  local d name
+  printf '%-16s %-9s %-40s %-6s %-8s %-10s %s\n' NAME STATUS SOURCE ENV SITE OWNER UNTIL
+  for d in "$STANDS"/*/; do
+    [[ -f $d/meta.env ]] || continue
+    name=$(basename "$d")
+    printf '%-16s %-9s %-40s %-6s %-8s %-10s %s\n' "$name" "$(meta_get "$name" status)" \
+      "$(meta_get "$name" source | cut -c1-40)" "$(meta_get "$name" env)" "$(meta_get "$name" site)" \
+      "$(meta_get "$name" owner | cut -c1-10)" "$(date -d "@$(meta_get "$name" expires)" '+%m-%d %R')"
+  done
+}
+
+remove() {
+  local name=$1 d pid; d=$(dir_of "$name")
+  pid=$(meta_get "$name" build_pid)
+  [[ -n $pid ]] && kill -- "-$pid" 2>/dev/null || true
+  docker rm -f "stand-$name" "stand-build-$name" >/dev/null 2>&1 || true
+  rm -rf "$d"
+}
+
+cmd_down() {
+  local name=${1:-}; [[ -n $name ]] || die "stand down <имя>"; name=${name,,}; valid_name "$name"; need "$name"
+  remove "$name"; echo "стенд $name удалён"
+}
+
+cmd_gc() { # таймер: просроченные и стенды закрытых задач
+  [[ $EUID -eq 0 && -z ${SUDO_USER:-} ]] || die "gc запускает только таймер"
+  local d name now issue st
+  now=$(date +%s)
+  for d in "$STANDS"/*/; do
+    [[ -f $d/meta.env ]] || continue
+    name=$(basename "$d")
+    if (($(meta_get "$name" expires) < now)); then
+      remove "$name"; echo "gc: $name — истёк срок"; continue
+    fi
+    issue=$(meta_get "$name" issue); [[ -n $issue ]] || continue
+    st=$(timeout 30 sudo -iu agents multica issue get "$issue" --output json 2>/dev/null |
+      python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || true)
+    if [[ $st == done || $st == cancelled ]]; then
+      remove "$name"; echo "gc: $name — задача $issue $st"
+    fi
+  done
+}
+
+[[ $EUID -eq 0 ]] || die "запускать через sudo: sudo stand ${*:-help}"
+mkdir -p "$STANDS"
+cmd=${1:-help}; shift || true
+case $cmd in
+  up | wait | status | logs | list | down | gc) "cmd_$cmd" "$@" ;;
+  _build) cmd__build "$@" ;;
+  help | -h | --help) usage ;;
+  *) usage; exit 2 ;;
+esac
