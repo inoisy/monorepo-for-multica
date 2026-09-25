@@ -22,6 +22,10 @@ BUILD_MEM=5g
 RUN_MEM=768m
 APP_UID=20000
 DEFAULT_SITE=azgaz
+# Bash-вызов агента живёт не дольше 10 минут, поэтому одно ожидание — 9 минут,
+# а «ещё собирается» — отдельный код выхода: агент просто зовёт wait ещё раз.
+WAIT_DEFAULT=540
+EXIT_PENDING=75 # EX_TEMPFAIL
 
 die() { echo "stand: $*" >&2; exit 1; }
 
@@ -31,7 +35,7 @@ stand — стенды epus/frontend (фронт на ветку, API — dev)
 
   stand up <имя> --ref <ветка|sha> [--env dev|stage] [--site <id>] [--issue <KEY>] [--wait]
   stand up <имя> --path <каталог>  [--env dev|stage] [--site <id>] [--issue <KEY>] [--wait]
-  stand wait <имя> [секунд]       дождаться окончания сборки (по умолчанию 900)
+  stand wait <имя> [секунд]       дождаться окончания сборки (по умолчанию 540)
   stand status <имя>              состояние и хвост лога сборки
   stand logs <имя> [строк]        логи работающего стенда (или сборки)
   stand list                      все стенды
@@ -43,7 +47,14 @@ stand — стенды epus/frontend (фронт на ветку, API — dev)
 --env  — чей бэк: dev (по умолчанию) или stage. Запекается в сборку —
          смена --env у того же стенда = пересборка.
 --site — сайт (NUXT_PUBLIC_SITE_CONFIG_ID), по умолчанию azgaz.
+--wait — после запуска сразу stand wait.
 Стенд живёт 48 часов с последнего up или до закрытия задачи.
+
+Код выхода wait и up --wait:
+  0  стенд работает
+  1  сборка или запуск упали (причина и хвост лога — в выводе)
+  75 ещё собирается или ждёт очереди — повторить stand wait <имя>
+Последняя строка вывода — итог одной строкой: stand: <имя> running|failed|pending.
 EOF
 }
 
@@ -178,6 +189,7 @@ cmd_up() {
 
   local now; now=$(date +%s)
   meta_set "$name" name "$name"
+  meta_set "$name" build_pid "" # до status=building: wait не должен проверять pid прошлой сборки
   meta_set "$name" status building
   meta_set "$name" source "$src_desc"
   meta_set "$name" ref "${ref:-}"
@@ -270,27 +282,63 @@ cmd__build() { # внутренняя: сборка и запуск, лог — 
   echo "[$(date +%T)] готово: https://$name.$DOMAIN (HTTP $code)"
 }
 
+builder_alive() { # имя — жив ли процесс _build этого стенда
+  local pid; pid=$(meta_get "$1" build_pid)
+  [[ -n $pid ]] || return 0 # pid ещё не записан: up только что запустил сборку
+  local cmdline; cmdline=$(tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline") || return 1
+  [[ " $cmdline " == *" _build $1 "* ]] # pid мог достаться другому процессу
+}
+
 cmd_wait() {
-  local name=${1:-} limit=${2:-900} st i
+  local name=${1:-} limit=${2:-$WAIT_DEFAULT} st
   [[ -n $name ]] || die "stand wait <имя> [секунд]"; name=${name,,}; valid_name "$name"; need "$name"
   [[ $limit =~ ^[0-9]{1,5}$ ]] || die "секунды — число"
-  for ((i = 0; i <= limit; i += 5)); do
+  local deadline=$((SECONDS + limit))
+  while :; do
+    exists "$name" || die "стенд '$name' удалён во время ожидания"
     st=$(meta_get "$name" status)
     [[ $st == building ]] || break
+    if ! builder_alive "$name"; then
+      # Сборщик мог успеть записать итог и выйти между двумя чтениями — перечитать.
+      st=$(meta_get "$name" status)
+      [[ $st == building ]] || break
+      # Сборщик убит (перезагрузка, OOM) и не успел записать итог — иначе
+      # статус висел бы в building вечно, а wait каждый раз ждал бы до упора.
+      meta_set "$name" status failed
+      meta_set "$name" error "процесс сборки пропал — stand up $name заново"
+      meta_set "$name" build_pid ""
+      st=failed; break
+    fi
+    ((SECONDS < deadline)) || break
     sleep 5
   done
-  cmd_status "$name"
-  [[ $st == running ]]
+  case $st in
+    running)
+      cmd_status "$name" --short
+      echo "stand: $name running https://$name.$DOMAIN"
+      return 0 ;;
+    building)
+      cmd_status "$name" --short
+      echo "--- лог сборки (последнее) ---"
+      tail -n 5 "$(dir_of "$name")/build.log" 2>/dev/null || true
+      echo "stand: $name pending — ещё собирается, повтори: sudo stand wait $name"
+      return "$EXIT_PENDING" ;;
+    *)
+      cmd_status "$name"
+      echo "stand: $name failed"
+      return 1 ;;
+  esac
 }
 
 cmd_status() {
-  local name=${1:-}; [[ -n $name ]] || die "stand status <имя>"; name=${name,,}; valid_name "$name"; need "$name"
+  local name=${1:-} short=${2:-}; [[ -n $name ]] || die "stand status <имя>"; name=${name,,}; valid_name "$name"; need "$name"
   local port; port=$(meta_get "$name" port)
   printf '%-9s %s\n' статус "$(meta_get "$name" status)" источник "$(meta_get "$name" source)" \
     бэк "$(meta_get "$name" env)" сайт "$(meta_get "$name" site)" задача "$(meta_get "$name" issue)" \
     адрес "https://$name.$DOMAIN" локально "http://127.0.0.1:$port" \
     до "$(date -d "@$(meta_get "$name" expires)" '+%F %R')"
   local err; err=$(meta_get "$name" error); [[ -z $err ]] || echo "ошибка    $err"
+  [[ $short != --short ]] || return 0
   echo "--- лог сборки (хвост) ---"
   tail -n 25 "$(dir_of "$name")/build.log" 2>/dev/null || true
 }
