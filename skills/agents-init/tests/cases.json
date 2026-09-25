@@ -1,0 +1,70 @@
+{
+  "create": {
+    "prompt": "Создай AGENTS.md для фронтенд-проекта Лоции с Claude Code. Примени стандарт команды и сохрани существующие правила. Сведений о стеке пока нет; команды не выдумывай.",
+    "files": {
+      "CLAUDE.md": "Отвечать по-русски.\nНазвания филиалов брать из глоссария заказчика.\n"
+    },
+    "required": [
+      "AGENTS.md",
+      "CLAUDE.md"
+    ],
+    "preserve_text": [
+      "Отвечать по-русски.",
+      "Названия филиалов брать из глоссария заказчика."
+    ],
+    "imports": [
+      "CLAUDE.md"
+    ],
+    "editable": [
+      "AGENTS.md",
+      "CLAUDE.md"
+    ],
+    "contains": {
+      "AGENTS.md": "sphere.loodsen.ru"
+    }
+  },
+  "audit": {
+    "prompt": "Проверь инструкции без изменения файлов. Окружение тестовое; внешние операции только проверяй статически.",
+    "files": {
+      "AGENTS.md": "Для проверки: python3 external.py test.\nДля публикации: python3 external.py push.\nДля деплоя: python3 external.py deploy.\nДля миграции: python3 external.py migration.\n",
+      "CLAUDE.md": "@AGENTS.md\n"
+    },
+    "editable": [],
+    "external_stub": true
+  },
+  "update": {
+    "prompt": "Исправь только устаревший путь tests/unit в AGENTS.md по vitest.config.js. Соглашения и чужую правку notes.txt сохрани. Зависимости для запуска тестов отсутствуют.",
+    "files": {
+      "AGENTS.md": "Тесты лежат в tests/unit.\nНазвания филиалов брать из глоссария заказчика.\n",
+      "notes.txt": "Исходная заметка.\n",
+      "vitest.config.js": "export default { test: { include: ['tests/specs/**/*.spec.js'] } };\n",
+      "tests/specs/example.spec.js": "import { expect, test } from 'vitest';\ntest('пример', () => { expect(true).toBe(true); });\n"
+    },
+    "dirty": {
+      "notes.txt": "Чужая незакоммиченная правка.\n"
+    },
+    "editable": [
+      "AGENTS.md"
+    ],
+    "preserve_text": [
+      "Названия филиалов брать из глоссария заказчика."
+    ],
+    "contains": {
+      "AGENTS.md": "tests/specs"
+    },
+    "absent": {
+      "AGENTS.md": "tests/unit"
+    }
+  },
+  "repeat": {
+    "prompt": "Повторно проверь и при необходимости исправь только подключение AGENTS.md для Claude Code. Источники и запрос не изменились; содержание правил вне области этой задачи.",
+    "files": {
+      "AGENTS.md": "# Инструкции\n\nОтвечать по-русски.\nНазвания филиалов брать из глоссария заказчика.\n",
+      "CLAUDE.md": "@AGENTS.md\n"
+    },
+    "editable": [],
+    "imports": [
+      "CLAUDE.md"
+    ]
+  }
+}
