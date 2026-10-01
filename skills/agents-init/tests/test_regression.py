@@ -61,6 +61,26 @@ class RegressionTests(unittest.TestCase):
         (repo / 'new.txt').write_text('Новый файл\n')
         self.assertTrue(verify(self.root))
 
+    def test_backend_missing_keeps_manual_marker(self):
+        repo = self.setup_case('backend_missing')
+        (repo / 'AGENTS.md').write_text(
+            '## Бэкенд и API\n'
+            '[заполнить вручную: адрес бэка по окружениям, прокси и где '
+            'лежит спецификация API]\n'
+        )
+        original = (repo / 'CLAUDE.md').read_text()
+        (repo / 'CLAUDE.md').write_text('@AGENTS.md\n' + original)
+        self.assertEqual(verify(self.root), [])
+        (repo / 'AGENTS.md').write_text(
+            '## Бэкенд и API\nhttps://api.example.com — взято из головы\n'
+        )
+        errors = verify(self.root)
+        self.assertTrue(
+            any('содержимое' in e for e in errors),
+            'ожидалась ошибка отсутствия маркера ручного пункта, получено: '
+            + repr(errors),
+        )
+
     def test_prepare_does_not_overwrite(self):
         self.setup_case('repeat')
         with self.assertRaises(FileExistsError):

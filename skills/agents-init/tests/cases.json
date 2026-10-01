@@ -66,5 +66,28 @@
     "imports": [
       "CLAUDE.md"
     ]
+  },
+  "backend_missing": {
+    "prompt": "Собери инструкции для фронтенд-проекта Лоции с Claude Code. Сведений о стеке и бэке нет — адрес и спецификацию не выдумывай, оставь ручной пункт с маркером и спроси в пачке.",
+    "files": {
+      "CLAUDE.md": "Отвечать по-русски.\n"
+    },
+    "required": [
+      "AGENTS.md",
+      "CLAUDE.md"
+    ],
+    "preserve_text": [
+      "Отвечать по-русски."
+    ],
+    "imports": [
+      "CLAUDE.md"
+    ],
+    "editable": [
+      "AGENTS.md",
+      "CLAUDE.md"
+    ],
+    "contains": {
+      "AGENTS.md": "[заполнить вручную:"
+    }
   }
 }
