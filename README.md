@@ -23,9 +23,9 @@ projects, one directory per project:
     README.md
 ```
 
-Everything here is MCP servers so far, so `mcp/` is the only category. New
-kinds of work get their own top-level directory (`services/`, `libs/`, …)
-rather than landing next to the MCP servers.
+Categories so far are `mcp/` and `services/`. New kinds of work get their own
+top-level directory (`libs/`, …) rather than landing next to an existing
+category.
 
 Projects are independent — there is no shared build graph, lockfile, or
 tooling version pinned at the monorepo root. Each project ships its own.
@@ -41,6 +41,13 @@ tooling version pinned at the monorepo root. Each project ships its own.
 - `mcp/sphere-tasks/` — MCP server + CLI for Bitrix24 Sphere
   (`sphere.loodsen.ru`) task management, sprint sync, and webhooks.
   Node.js, TypeScript, npm. See `mcp/sphere-tasks/README.md`.
+
+### `services/` — services of the agents' server
+
+- `services/stand/` — branch stands and static artifacts on
+  `*.stand.yakutov.com`: the `stand` CLI, its MCP server, the router and the
+  static server. Bash, Python, Node.js, no build step. Deployed by hand by the
+  server owner. See `services/stand/README.md`.
 
 ## Conventions
 

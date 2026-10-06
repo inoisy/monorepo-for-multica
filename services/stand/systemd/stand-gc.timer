@@ -1,0 +1,9 @@
+[Unit]
+Description=Уборка стендов раз в час
+
+[Timer]
+OnCalendar=*:17
+Persistent=true
+
+[Install]
+WantedBy=timers.target

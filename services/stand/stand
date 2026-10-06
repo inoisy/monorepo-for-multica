@@ -1,0 +1,942 @@
+#!/bin/bash
+# stand — стенды на ветку: собрать, поднять, показать, убрать.
+# Агенты зовут через sudo (sudoers разрешает только этот скрипт), docker им не
+# отдаётся. Что и как собирается, задаёт вид стенда (--kind) в этом скрипте, а
+# не ветка: ветка не должна управлять тем, что делает root. Код ветки работает
+# только внутри контейнера без привилегий, с лимитами памяти и CPU.
+set -euo pipefail
+umask 022
+
+ROOT=/var/lib/stand
+CONF=/etc/stand
+STANDS=$ROOT/stands
+GITDIR=$ROOT/git
+REPOS_CONF=$CONF/repos.conf        # "<алиас> <git url> [ключ]" — какие репозитории можно ставить
+SECRETS=$CONF/secrets              # <имя>.env — переменные для --secret, только root
+STATIC_SERVER=/opt/stand/static-server.mjs
+COMPOSE_GEN=/opt/stand/compose-gen.py
+GIT_KEY_DEFAULT=/home/agents/.ssh/id_ed25519
+GIT_SSH="ssh -o IdentitiesOnly=yes -o UserKnownHostsFile=/home/agents/.ssh/known_hosts -o BatchMode=yes -i"
+NODE_IMAGE=docker-base.loodsen.ru/library/node:24.11.0
+INTERNAL_HOSTS="registry.loodsen.ru docker-base.loodsen.ru"  # docker-сборке — адреса с хоста (DNS VPN)
+DOMAIN=stand.yakutov.com
+PORT_MIN=9100
+PORT_MAX=9139
+MAX_STANDS=8
+TTL_HOURS=48
+TTL_MAX_HOURS=168
+BUILD_MEM=5g
+RUN_MEM=768m
+APP_UID=20000
+DEFAULT_SITE=azgaz
+DEFAULT_KIND=epus-frontend
+KINDS="epus-frontend node static docker compose"
+COMPOSE_FILES="compose.yaml compose.yml docker-compose.yaml docker-compose.yml"
+EXEC_TIMEOUT_MAX=600
+ARTS=$ROOT/artifacts
+SHELLS=/opt/stand/artifact-shells
+ART_MAX_BYTES=$((20 * 1024 * 1024))
+ART_MAX_FILES=2000
+ART_MAX_COUNT=1000
+ART_TTL_DAYS=90
+ART_TTL_MAX=365
+
+die() { echo "stand: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+stand — стенды на ветку: https://<имя>.stand.yakutov.com
+
+  stand up <имя> --ref <ветка|sha> [--kind <вид>] [--repo <алиас>] [--subdir <путь>] [--follow] [опции]
+  stand up <имя> --path <каталог>  [--kind <вид>] [опции]
+  stand wait <имя> [секунд]       дождаться окончания сборки (по умолчанию 900)
+  stand status <имя>              состояние и хвост лога сборки
+  stand logs <имя> [строк] [сервис]  логи работающего стенда (или сборки)
+  stand exec <имя> [--service <с>] [--timeout <сек>] -- <команда…>
+                                  команда внутри контейнера стенда (миграции, CLI, psql)
+  stand list                      все стенды
+  stand repos                     какие репозитории можно ставить
+  stand down <имя>                остановить и удалить
+
+  stand art publish <файл|каталог> [--name <имя>] [--title <заголовок>] [--ttl <дней>] [--issue <KEY>]
+  stand art list                  все артефакты
+  stand art rm <art-имя>          удалить артефакт
+
+Виды (--kind):
+  epus-frontend  фронт epus (по умолчанию): pnpm build, Nuxt .output, API dev/stage
+  node           любое Node-приложение: install по lock-файлу, `build` если есть,
+                 запуск `npm start`; слушать PORT (3000) на 0.0.0.0
+  static         статика: `build` если есть package.json, раздаётся каталог
+                 --publish (по умолчанию первый из dist, build, out, public, .)
+  docker         Dockerfile из ветки: сборка образа, запуск без capabilities
+                 (кроме базовых), порт из EXPOSE или --app-port
+  compose        docker-compose из ветки: приложение + БД/кэш/очереди (до 4 сервисов).
+                 Разрешены image/build, environment/env_file, command, healthcheck,
+                 depends_on, именованные тома; bind-тома, privileged, сети и порты
+                 хоста — нет. Наружу — один сервис (--service), порт из ports/expose
+                 или --app-port. ${VAR} — из --var и --secret; ${VAR:?} без значения
+                 — случайное, сохраняется между пересборками (пароль БД).
+                 Данные томов переживают пересборку, `stand down` их удаляет.
+
+<имя>     ключ задачи (stt-12) или короткое имя: [a-z0-9-], до 40 символов.
+--ref     ветка или коммит (ветку сначала запушить).
+--follow  только с --ref на ветку: пересобирать стенд, когда в ветке новый коммит
+          (проверка раз в 2 минуты). Повторный up без --follow слежение снимает.
+--path    рабочая копия на сервере, берётся как есть, с незакоммиченным.
+--repo    алиас репозитория из `stand repos` (по умолчанию frontend).
+--subdir  подкаталог репозитория (монорепо), напр. libs/jev-decisions/demo.
+--secret  имя набора переменных из /etc/stand/secrets (можно несколько раз).
+--publish каталог статики относительно проекта (только static).
+--app-port порт внутри контейнера (docker/compose, если нет EXPOSE/ports).
+--service только compose: какой сервис открыть наружу.
+--compose-file только compose: путь к файлу (по умолчанию compose.yaml / docker-compose.yml).
+--var     только compose: KEY=VALUE для подстановки ${KEY} (можно несколько раз).
+          Доступны сразу: STAND_NAME, STAND_URL (https-адрес стенда).
+--ttl     часов жизни (по умолчанию 48, максимум 168).
+--env     dev|stage — только epus-frontend: чей бэк, запекается в сборку.
+--site    только epus-frontend: сайт (NUXT_PUBLIC_SITE_CONFIG_ID), по умолчанию azgaz.
+Стенд живёт --ttl часов (48) с последнего up или до закрытия задачи.
+
+Артефакты — статические страницы без сборки и контейнера (аналог artifacts в Claude):
+  .jsx/.tsx   React-компонент `export default`: Tailwind, recharts, lucide-react, d3, three…
+  .html       страница как есть        .md   Markdown (+ ```mermaid)
+  .mmd        Mermaid-диаграмма        .svg  картинка
+  каталог     готовый сайт с index.html
+Адрес https://art-<имя>-<случайный суффикс>.stand.yakutov.com, живёт --ttl дней (90).
+Повторный publish с --name art-… обновляет артефакт по тому же адресу.
+EOF
+}
+
+# ---------- проверки ввода ----------
+
+valid_name() {
+  [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || die "имя '$1': только [a-z0-9-], до 40 символов"
+  [[ $1 != auth && $1 != www && $1 != art-* ]] || die "имя '$1' зарезервировано (art-* — для артефактов)"
+}
+valid_ref() {
+  [[ $1 =~ ^[A-Za-z0-9._/-]{1,200}$ && $1 != -* && $1 != *..* ]] || die "ref '$1' недопустим"
+}
+valid_site() { [[ $1 =~ ^[a-z0-9-]{1,40}$ ]] || die "site '$1' недопустим"; }
+valid_issue() { [[ $1 =~ ^[A-Z][A-Z0-9]{0,9}-[0-9]{1,7}$ ]] || die "issue '$1': ожидается вида STT-12"; }
+valid_kind() { [[ " $KINDS " == *" $1 "* ]] || die "вид '$1' неизвестен: $KINDS"; }
+valid_relpath() { # подкаталог внутри проекта: без абсолютных путей и '..'
+  [[ $2 =~ ^[A-Za-z0-9._/-]{1,200}$ && $2 != /* && $2 != -* && $2 != *..* ]] || die "$1 '$2' недопустим"
+}
+valid_secret() {
+  [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || die "secret '$1' недопустим"
+  [[ -f $SECRETS/$1.env ]] || die "secret '$1' не заведён (/etc/stand/secrets/$1.env)"
+}
+valid_port() { [[ $1 =~ ^[0-9]{2,5}$ ]] && (($1 >= 1 && $1 <= 65535)) || die "порт '$1' недопустим"; }
+
+repo_url() { # алиас → url из repos.conf
+  [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || die "repo '$1' недопустим"
+  local url
+  url=$(awk -v a="$1" '$1 == a && (NF == 2 || NF == 3) { print $2 }' "$REPOS_CONF" 2>/dev/null | tail -1)
+  [[ -n $url ]] || die "репозитория '$1' нет в списке — stand repos"
+  echo "$url"
+}
+
+repo_key() { # алиас → ssh-ключ (третья колонка repos.conf, только из ~agents/.ssh)
+  local key
+  key=$(awk -v a="$1" '$1 == a && NF == 3 { print $3 }' "$REPOS_CONF" 2>/dev/null | tail -1)
+  key=${key:-$GIT_KEY_DEFAULT}
+  [[ $key =~ ^/home/agents/\.ssh/[A-Za-z0-9._-]+$ && -f $key ]] || die "ключ '$key' для '$1' недопустим"
+  echo "$key"
+}
+
+# ---------- реестр ----------
+
+dir_of() { echo "$STANDS/$1"; }
+
+meta_get() { # имя ключ
+  local f; f="$(dir_of "$1")/meta.env"
+  [[ -f $f ]] || return 0
+  sed -n "s/^$2=//p" "$f" | tail -1
+}
+
+meta_set() { # имя ключ значение — значения без переводов строк и '='-ловушек
+  local f tmp; f="$(dir_of "$1")/meta.env"; tmp="$f.tmp.$$"
+  [[ $3 != *$'\n'* ]] || die "meta: перевод строки в значении"
+  { [[ -f $f ]] && grep -v "^$2=" "$f" || true; echo "$2=$3"; } >"$tmp"
+  chmod 644 "$tmp"; mv "$tmp" "$f"
+}
+
+exists() { [[ -f "$(dir_of "$1")/meta.env" ]]; }
+need() { exists "$1" || die "стенда '$1' нет (stand list)"; }
+
+# Жив ли процесс сборки. Статус building переживает смерть сборки (kill, OOM,
+# перезагрузка): ERR-trap на сигнал не срабатывает, поэтому верим pid, а не статусу.
+build_alive() {
+  local pid; pid=$(meta_get "$1" build_pid)
+  [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/cmdline ]] || return 1
+  tr '\0' ' ' <"/proc/$pid/cmdline" | grep -q -- " _build $1 "
+}
+
+active_count_except() { # сколько стендов building/running, кроме указанного
+  local n=0 d name st
+  for d in "$STANDS"/*/; do
+    [[ -d $d ]] || continue
+    name=$(basename "$d"); [[ $name == "$1" ]] && continue
+    st=$(meta_get "$name" status)
+    [[ $st == building || $st == running ]] && n=$((n + 1))
+  done
+  echo "$n"
+}
+
+alloc_port() {
+  local p used
+  used=$(cat "$STANDS"/*/meta.env 2>/dev/null | sed -n 's/^port=//p' || true)
+  for ((p = PORT_MIN; p <= PORT_MAX; p++)); do
+    grep -qx "$p" <<<"$used" && continue
+    ss -Hltn "sport = :$p" | grep -q . && continue
+    echo "$p"; return
+  done
+  die "нет свободных портов $PORT_MIN-$PORT_MAX"
+}
+
+# ---------- git ----------
+
+mirror_of() { echo "$GITDIR/$1.git"; }
+
+mirror_fetch() { # алиас
+  local mirror url key; mirror=$(mirror_of "$1"); url=$(repo_url "$1"); key=$(repo_key "$1")
+  mkdir -p "$GITDIR"
+  exec 8>"$ROOT/git.lock"; flock 8
+  if [[ ! -d $mirror ]]; then
+    GIT_SSH_COMMAND="$GIT_SSH $key" git clone -q --mirror "$url" "$mirror"
+  else
+    GIT_SSH_COMMAND="$GIT_SSH $key" git -C "$mirror" fetch -q --prune origin '+refs/heads/*:refs/heads/*'
+  fi
+  flock -u 8
+}
+
+resolve_sha() { # алиас ref → полный sha или пусто
+  local mirror; mirror=$(mirror_of "$1")
+  git -C "$mirror" rev-parse -q --verify "refs/heads/$2^{commit}" 2>/dev/null ||
+    git -C "$mirror" rev-parse -q --verify "$2^{commit}" 2>/dev/null || true
+}
+
+# ---------- команды ----------
+
+cmd_up() {
+  local name="" ref="" path="" site="$DEFAULT_SITE" env=dev issue="" wait=0 follow=""
+  local kind="$DEFAULT_KIND" repo="" subdir="" publish="" app_port="" secrets=()
+  local service="" compose_file="" ttl=$TTL_HOURS vars=()
+  name=${1:-}; [[ -n $name ]] || { usage; exit 2; }; shift
+  name=${name,,}; valid_name "$name"
+  while (($#)); do
+    case $1 in
+      --ref) ref=${2:-}; shift 2 ;;
+      --path) path=${2:-}; shift 2 ;;
+      --site) site=${2:-}; shift 2 ;;
+      --env) env=${2:-}; shift 2 ;;
+      --issue) issue=${2:-}; shift 2 ;;
+      --kind) kind=${2:-}; shift 2 ;;
+      --repo) repo=${2:-}; shift 2 ;;
+      --subdir) subdir=${2:-}; shift 2 ;;
+      --publish) publish=${2:-}; shift 2 ;;
+      --app-port) app_port=${2:-}; shift 2 ;;
+      --secret) secrets+=("${2:-}"); shift 2 ;;
+      --service) service=${2:-}; shift 2 ;;
+      --compose-file) compose_file=${2:-}; shift 2 ;;
+      --var) vars+=("${2:-}"); shift 2 ;;
+      --ttl) ttl=${2:-}; shift 2 ;;
+      --wait) wait=1; shift ;;
+      --follow) follow=1; shift ;;
+      *) die "неизвестный аргумент '$1'" ;;
+    esac
+  done
+  [[ -n $ref || -n $path ]] || die "нужен --ref <ветка> или --path <каталог>"
+  [[ -z $ref || -z $path ]] || die "либо --ref, либо --path"
+  valid_kind "$kind"
+  [[ -n $repo ]] || repo=frontend
+  if [[ $kind == epus-frontend ]]; then
+    [[ $repo == frontend && -z $subdir ]] || die "epus-frontend собирается только из frontend без --subdir"
+    valid_site "$site"
+    [[ $env == dev || $env == stage ]] || die "--env: dev или stage"
+  fi
+  [[ -z $subdir ]] || valid_relpath --subdir "$subdir"
+  [[ -z $publish ]] || { [[ $kind == static ]] || die "--publish только для static"; valid_relpath --publish "$publish"; }
+  [[ -z $app_port ]] || { [[ $kind == docker || $kind == compose ]] || die "--app-port только для docker и compose"; valid_port "$app_port"; }
+  if [[ $kind != compose ]]; then
+    [[ -z $service && -z $compose_file && ${#vars[@]} -eq 0 ]] || die "--service, --compose-file, --var — только для compose"
+  fi
+  [[ -z $service ]] || [[ $service =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$ ]] || die "--service '$service' недопустим"
+  [[ -z $compose_file ]] || valid_relpath --compose-file "$compose_file"
+  [[ $ttl =~ ^[0-9]{1,3}$ ]] && ((ttl >= 1 && ttl <= TTL_MAX_HOURS)) || die "--ttl: от 1 до $TTL_MAX_HOURS часов"
+  local v; for v in "${vars[@]}"; do
+    [[ $v =~ ^[A-Za-z_][A-Za-z0-9_]*= && $v != *$'\n'* && ${#v} -le 4000 ]] || die "--var '${v%%=*}': ожидается KEY=VALUE в одну строку"
+    [[ $v != STAND_* ]] || die "--var: STAND_* задаёт stand"
+  done
+  local s; for s in "${secrets[@]}"; do valid_secret "$s"; done
+  if [[ -z $issue && $name =~ ^[a-z][a-z0-9]{0,9}-[0-9]+$ ]]; then issue=${name^^}; fi
+  [[ -z $issue ]] || valid_issue "$issue"
+
+  local d; d=$(dir_of "$name")
+  if exists "$name" && [[ $(meta_get "$name" status) == building ]] && build_alive "$name"; then
+    die "'$name' уже собирается — stand wait $name"
+  fi
+  (($(active_count_except "$name") < MAX_STANDS)) ||
+    die "уже $MAX_STANDS стендов — уберите лишние (stand list / stand down)"
+
+  local sha="" src_desc
+  if [[ -n $ref ]]; then
+    valid_ref "$ref"
+    mirror_fetch "$repo"
+    sha=$(resolve_sha "$repo" "$ref")
+    [[ -n $sha ]] || die "в $repo нет ветки или коммита '$ref' (ветку надо запушить)"
+    if [[ -n $follow ]]; then
+      git -C "$(mirror_of "$repo")" rev-parse -q --verify "refs/heads/$ref" >/dev/null ||
+        die "--follow: '$ref' — не ветка в $repo (за коммитом следить нечего)"
+    fi
+    if [[ -n $subdir ]]; then
+      git -C "$(mirror_of "$repo")" cat-file -e "$sha:$subdir" 2>/dev/null || die "в $ref нет каталога '$subdir'"
+    fi
+    src_desc="$repo:$ref@${sha:0:10}${subdir:+ /$subdir}"
+  else
+    [[ $path == /* ]] || die "--path: нужен абсолютный путь"
+    path=$(realpath -e -- "$path") || die "--path: каталога нет"
+    [[ -z $subdir ]] || { path=$(realpath -e -- "$path/$subdir") || die "--path: нет '$subdir'"; subdir=""; }
+    case $kind in
+      epus-frontend) [[ -f $path/package.json && -f $path/nuxt.config.ts ]] || die "--path: это не epus/frontend" ;;
+      node) [[ -f $path/package.json ]] || die "--path: нет package.json" ;;
+      docker) [[ -f $path/Dockerfile ]] || die "--path: нет Dockerfile" ;;
+    esac
+    [[ -z $follow ]] || die "--follow только с --ref на ветку"
+    src_desc="path:$path"
+  fi
+
+  local port; port=$(meta_get "$name" port); [[ -n $port ]] || port=$(alloc_port)
+  # Смена вида у того же имени: старый контейнер и образ убираем здесь, сборка — с нуля.
+  docker rm -f "stand-$name" >/dev/null 2>&1 || true
+  [[ $kind == compose || $(meta_get "$name" kind) != compose ]] || compose_down "$name" -v
+  mkdir -p "$d"; chmod 755 "$d"
+  rm -rf "$d/src" "$d/output"; mkdir -p "$d/src"
+
+  if [[ -n $path ]]; then
+    # Копируем правами того, кто позвал: root не должен читать за агента чужое.
+    local who=${SUDO_USER:-root}
+    sudo -u "$who" tar -C "$path" --exclude=./node_modules --exclude=./.nuxt \
+      --exclude=./.output --exclude=./.git -cf - . | tar -C "$d/src" -xf - ||
+      die "--path: не удалось скопировать (нет прав у $who?)"
+  fi
+
+  local now; now=$(date +%s)
+  meta_set "$name" name "$name"
+  meta_set "$name" status building
+  meta_set "$name" kind "$kind"
+  meta_set "$name" source "$src_desc"
+  meta_set "$name" repo "$repo"
+  meta_set "$name" ref "${ref:-}"
+  meta_set "$name" sha "$sha"
+  meta_set "$name" follow "$follow"
+  meta_set "$name" subdir "$subdir"
+  meta_set "$name" publish "$publish"
+  meta_set "$name" app_port "$app_port"
+  meta_set "$name" secrets "${secrets[*]:-}"
+  meta_set "$name" service "$service"
+  meta_set "$name" compose_file "$compose_file"
+  meta_set "$name" ttl "$ttl"
+  # --var — не секреты, но пишем root-only: агент мог положить туда что угодно.
+  (umask 077; printf '%s\n' "${vars[@]}" | grep -v '^$' >"$d/vars.env" || true)
+  meta_set "$name" site "$([[ $kind == epus-frontend ]] && echo "$site" || true)"
+  meta_set "$name" env "$([[ $kind == epus-frontend ]] && echo "$env" || true)"
+  meta_set "$name" issue "$issue"
+  meta_set "$name" port "$port"
+  meta_set "$name" owner "${MULTICA_AGENT_NAME:-${SUDO_USER:-root}}"
+  meta_set "$name" task "${MULTICA_TASK_ID:-}"
+  meta_set "$name" updated "$now"
+  meta_set "$name" expires $((now + ttl * 3600))
+  meta_set "$name" error ""
+
+  : >"$d/build.log"
+  setsid nohup "$0" _build "$name" >>"$d/build.log" 2>&1 </dev/null &
+  meta_set "$name" build_pid "$!"
+
+  echo "стенд $name: сборка запущена ($kind, $src_desc)"
+  echo "  прогресс:  stand status $name   ждать: stand wait $name"
+  echo "  адрес:     https://$name.$DOMAIN  (изнутри сервера: http://127.0.0.1:$port)"
+  if ((wait)); then cmd_wait "$name"; fi
+}
+
+# ---------- сборка и запуск по видам ----------
+# Каждый вид: build_<вид> собирает в $d/src и кладёт результат в $d/output,
+# run_<вид> поднимает контейнер stand-<имя> на 127.0.0.1:$port.
+
+secret_args() { # имя → --env-file для каждого секрета
+  local s; for s in $(meta_get "$1" secrets); do printf '%s\n' --env-file "$SECRETS/$s.env"; done
+}
+
+node_build_container() { # имя, каталог, скрипт — сборка кода ветки в node-образе без root
+  local name=$1 src=$2 script=$3; shift 3
+  chown -R "$APP_UID:$APP_UID" "$src"
+  docker rm -f "stand-build-$name" >/dev/null 2>&1 || true
+  docker run --rm --name "stand-build-$name" \
+    --memory "$BUILD_MEM" --cpus 4 --user "$APP_UID:$APP_UID" "$@" \
+    -e HOME=/tmp/home -e COREPACK_HOME=/cache/corepack -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    -e npm_config_store_dir=/cache/pnpm-store -e pnpm_config_store_dir=/cache/pnpm-store \
+    -e npm_config_cache=/cache/npm -e YARN_CACHE_FOLDER=/cache/yarn \
+    -e NODE_OPTIONS=--max-old-space-size=4096 -e CI=true \
+    -v "$src:/src" -v stand-cache:/cache -w /src \
+    "$NODE_IMAGE" sh -ec "$script"
+}
+
+# Установка зависимостей по lock-файлу и `build`, если он объявлен в package.json.
+NODE_INSTALL_BUILD='
+  mkdir -p /tmp/bin && corepack enable --install-directory /tmp/bin && export PATH=/tmp/bin:$PATH
+  if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile; PM=pnpm
+  elif [ -f yarn.lock ]; then yarn install --immutable || yarn install --frozen-lockfile; PM=yarn
+  elif [ -f package-lock.json ]; then npm ci; PM=npm
+  else npm install; PM=npm; fi
+  if node -e "process.exit(require(\"./package.json\").scripts?.build ? 0 : 1)"; then $PM run build; fi'
+
+run_common() { # имя, порт внутри, образ, [docker-аргументы…] -- [команда…]
+  local name=$1 inner=$2 image=$3; shift 3
+  local port; port=$(meta_get "$name" port)
+  local -a extra=() cmd=()
+  while (($#)) && [[ $1 != -- ]]; do extra+=("$1"); shift; done
+  (($#)) && shift
+  cmd=("$@")
+  local -a sec; mapfile -t sec < <(secret_args "$name")
+  docker rm -f "stand-$name" >/dev/null 2>&1 || true
+  docker run -d --name "stand-$name" --restart unless-stopped \
+    --label stand="$name" --memory "$RUN_MEM" --cpus 1 --pids-limit 512 \
+    --security-opt no-new-privileges "${sec[@]}" "${extra[@]}" \
+    -p "127.0.0.1:$port:$inner" "$image" "${cmd[@]}" >/dev/null
+}
+
+build_epus-frontend() {
+  local name=$1 d=$2 env; env=$(meta_get "$name" env); env=${env:-dev}
+  install -m 644 "$CONF/frontend.$env.build.env" "$d/src/.env"
+  node_build_container "$name" "$d/src" '
+      mkdir -p /tmp/bin && corepack enable --install-directory /tmp/bin && export PATH=/tmp/bin:$PATH
+      pnpm install --frozen-lockfile
+      pnpm run postinstall
+      pnpm run build' --env-file "$CONF/frontend.$env.build.env" || return 1
+  [[ -f $d/src/.output/server/index.mjs ]] || { echo "после сборки нет .output/server/index.mjs"; return 1; }
+  mv "$d/src/.output" "$d/output"
+}
+
+run_epus-frontend() {
+  local name=$1 d=$2 env site; env=$(meta_get "$name" env); env=${env:-dev}; site=$(meta_get "$name" site)
+  # Картинки dev-бэка в частной сети — отдаём их через сам стенд (/upload
+  # проксирует Caddy); stage-бэк публичный, его адрес остаётся как есть.
+  local img=()
+  [[ $env == dev ]] && img=(-e "NUXT_PUBLIC_IMG_BASE_URL=https://$name.$DOMAIN")
+  run_common "$name" 3000 "$NODE_IMAGE" --user "$APP_UID:$APP_UID" --read-only --tmpfs /tmp \
+    --env-file "$CONF/frontend.$env.run.env" -e NUXT_PUBLIC_SITE_CONFIG_ID="$site" "${img[@]}" \
+    -v "$d/output:/app/.output:ro" -w /app -- node .output/server/index.mjs
+}
+
+build_node() {
+  local name=$1 d=$2
+  [[ -f $d/src/package.json ]] || { echo "нет package.json"; return 1; }
+  node_build_container "$name" "$d/src" "$NODE_INSTALL_BUILD" || return 1
+  mv "$d/src" "$d/output"
+}
+
+run_node() {
+  local name=$1 d=$2
+  run_common "$name" 3000 "$NODE_IMAGE" --user "$APP_UID:$APP_UID" --read-only --tmpfs /tmp \
+    -e HOME=/tmp -e npm_config_cache=/tmp/npm -e NODE_ENV=production -e PORT=3000 -e HOST=0.0.0.0 \
+    -e PUBLIC_URL="https://$name.$DOMAIN" -v "$d/output:/app:ro" -w /app -- npm start
+}
+
+build_static() {
+  local name=$1 d=$2 publish dir; publish=$(meta_get "$name" publish)
+  if [[ -f $d/src/package.json ]]; then
+    node_build_container "$name" "$d/src" "$NODE_INSTALL_BUILD" || return 1
+  fi
+  if [[ -n $publish ]]; then
+    dir=$publish
+  else
+    for dir in dist build out public .; do [[ -d $d/src/$dir ]] && break; done
+  fi
+  dir=$(realpath -e -- "$d/src/$dir") || { echo "нет каталога статики '$publish'"; return 1; }
+  [[ $dir == "$d/src" || $dir == "$d/src/"* ]] || { echo "--publish вне проекта"; return 1; }
+  [[ -f $dir/index.html ]] || { echo "в каталоге статики нет index.html"; return 1; }
+  mv "$dir" "$d/output.tmp" && rm -rf "$d/src" && mv "$d/output.tmp" "$d/output"
+  rm -rf "$d/output/node_modules"
+}
+
+run_static() {
+  local name=$1 d=$2
+  run_common "$name" 3000 "$NODE_IMAGE" --user "$APP_UID:$APP_UID" --read-only --tmpfs /tmp \
+    -v "$d/output:/site:ro" -v "$STATIC_SERVER:/srv/static-server.mjs:ro" -- node /srv/static-server.mjs /site 3000
+}
+
+build_docker() {
+  local name=$1 d=$2
+  [[ -f $d/src/Dockerfile ]] || { echo "нет Dockerfile"; return 1; }
+  # Образ собирается из ветки: RUN-шаги идут в изоляции BuildKit без --privileged и
+  # без доступа к секретам и файлам хоста; результат — только образ stand-img-<имя>.
+  # Внутренние хосты Лоции резолвит только DNS VPN на хосте, контейнеры сборки
+  # их не видят: передаём адреса явно. --network host нельзя — ветка получила бы
+  # доступ к 127.0.0.1 хоста.
+  local h ip hosts=()
+  for h in $INTERNAL_HOSTS; do
+    ip=$(getent ahostsv4 "$h" | awk 'NR == 1 { print $1 }')
+    [[ -z $ip ]] || hosts+=(--add-host "$h:$ip")
+  done
+  DOCKER_BUILDKIT=1 docker build --pull "${hosts[@]}" -t "stand-img-$name" "$d/src" || return 1
+  mkdir -p "$d/output"; rm -rf "$d/src"
+}
+
+run_docker() {
+  local name=$1 d=$2 inner; inner=$(meta_get "$name" app_port)
+  if [[ -z $inner ]]; then
+    inner=$(docker image inspect -f '{{range $p, $_ := .Config.ExposedPorts}}{{$p}} {{end}}' "stand-img-$name" |
+      tr ' ' '\n' | sed -n 's#/tcp$##p' | head -1)
+    [[ -n $inner ]] || { echo "в образе нет EXPOSE — укажите --app-port"; return 1; }
+  fi
+  [[ $inner =~ ^[0-9]{2,5}$ ]] || { echo "порт '$inner' недопустим"; return 1; }
+  # Пользователь — из образа (nginx и т. п. стартуют root и сбрасывают права сами);
+  # capabilities — только базовые для этого, без сети хоста и без --privileged.
+  run_common "$name" "$inner" "stand-img-$name" --cap-drop ALL \
+    --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add NET_BIND_SERVICE --cap-add DAC_OVERRIDE \
+    --tmpfs /tmp -e PORT="$inner" -e PUBLIC_URL="https://$name.$DOMAIN" --
+}
+
+# ---------- compose ----------
+# Файл ветки docker не видит: compose-gen.py пропускает белый список ключей и пишет
+# $d/compose.json с ограничениями stand. Дальше compose работает только с ним.
+
+compose() { # имя, аргументы docker compose…
+  local name=$1 d; shift; d=$(dir_of "$name")
+  [[ -f $d/compose.json ]] || { echo "у стенда нет compose.json" >&2; return 1; }
+  local -a files=(-f "$d/compose.json")
+  [[ -f $d/compose.port.json ]] && files+=(-f "$d/compose.port.json")
+  docker compose -p "stand-$name" --project-directory "$d" --env-file /dev/null "${files[@]}" "$@"
+}
+
+compose_down() { # имя [-v] — остановить проект; -v — вместе с томами и образами
+  local name=$1 d; d=$(dir_of "$name")
+  if [[ -f $d/compose.json ]]; then
+    compose "$name" down --remove-orphans ${2:+-v --rmi local} >/dev/null 2>&1 || true
+  fi
+  # Подстраховка без файла: всё, что помечено проектом.
+  local ids; ids=$(docker ps -aq --filter "label=com.docker.compose.project=stand-$name")
+  [[ -z $ids ]] || docker rm -f $ids >/dev/null 2>&1 || true
+  if [[ -n ${2:-} ]]; then
+    ids=$(docker volume ls -q --filter "label=com.docker.compose.project=stand-$name")
+    [[ -z $ids ]] || docker volume rm -f $ids >/dev/null 2>&1 || true
+    ids=$(docker image ls -q --filter "reference=stand-$name-*")
+    [[ -z $ids ]] || docker image rm -f $ids >/dev/null 2>&1 || true
+  fi
+}
+
+build_compose() {
+  local name=$1 d=$2 file args=() h ip s
+  file=$(meta_get "$name" compose_file)
+  if [[ -z $file ]]; then
+    for file in $COMPOSE_FILES ""; do [[ -n $file && -f $d/src/$file ]] && break; done
+    [[ -n $file ]] || { echo "нет compose-файла ($COMPOSE_FILES) — укажите --compose-file"; return 1; }
+  fi
+  for h in $INTERNAL_HOSTS; do
+    ip=$(getent ahostsv4 "$h" | awk 'NR == 1 { print $1 }')
+    [[ -z $ip ]] || args+=(--build-host "$h:$ip")
+  done
+  for s in $(meta_get "$name" secrets); do args+=(--vars "$SECRETS/$s.env"); done
+  (umask 077; printf 'STAND_NAME=%s\nSTAND_URL=https://%s.%s\n' "$name" "$name" "$DOMAIN" >"$d/stand-vars.env")
+  args+=(--vars "$d/stand-vars.env")
+  [[ -s $d/vars.env ]] && args+=(--vars "$d/vars.env")
+  s=$(meta_get "$name" service); [[ -z $s ]] || args+=(--service "$s")
+  echo "compose: $file"
+  local out
+  out=$(python3 "$COMPOSE_GEN" --src "$d/src" --file "$file" --name "$name" --out "$d/compose.json" \
+    --generated "$d/generated.env" --mem "$RUN_MEM" "${args[@]}") || return 1
+  read -r s h <<<"$out"
+  meta_set "$name" web "$s"; meta_set "$name" web_port "$h"
+  echo "наружу: сервис $s${h:+, порт $h}"
+  rm -f "$d/compose.port.json"
+  compose "$name" pull --ignore-buildable --quiet || return 1
+  DOCKER_BUILDKIT=1 compose "$name" build --pull || return 1
+  mkdir -p "$d/output"
+}
+
+run_compose() {
+  local name=$1 d=$2 web inner port; web=$(meta_get "$name" web); port=$(meta_get "$name" port)
+  inner=$(meta_get "$name" app_port); [[ -n $inner ]] || inner=$(meta_get "$name" web_port)
+  if [[ -z $inner ]]; then
+    local img; img=$(compose "$name" config --images "$web" 2>/dev/null | head -1)
+    inner=$(docker image inspect -f '{{range $p, $_ := .Config.ExposedPorts}}{{$p}} {{end}}' "$img" 2>/dev/null |
+      tr ' ' '\n' | sed -n 's#/tcp$##p' | head -1)
+    [[ -n $inner ]] || { echo "у сервиса $web нет ports/expose/EXPOSE — укажите --app-port"; return 1; }
+  fi
+  [[ $inner =~ ^[0-9]{2,5}$ ]] || { echo "порт '$inner' недопустим"; return 1; }
+  printf '{"services":{"%s":{"ports":["127.0.0.1:%s:%s"]}}}\n' "$web" "$port" "$inner" >"$d/compose.port.json"
+  chmod 600 "$d/compose.port.json"
+  compose "$name" up -d --remove-orphans --wait --wait-timeout 300 ||
+    { compose "$name" ps -a; compose "$name" logs --no-color --tail 40; return 1; }
+}
+
+cmd__build() { # внутренняя: сборка и запуск, лог — в build.log
+  local name=$1 d; d=$(dir_of "$name")
+  local sha kind repo subdir port
+  sha=$(meta_get "$name" sha); kind=$(meta_get "$name" kind); kind=${kind:-$DEFAULT_KIND}
+  repo=$(meta_get "$name" repo); repo=${repo:-frontend}; subdir=$(meta_get "$name" subdir)
+  port=$(meta_get "$name" port)
+  fail() { meta_set "$name" status failed; meta_set "$name" error "$1"; echo "ОШИБКА: $1"; exit 1; }
+  trap 'fail "сборка прервана (строка $LINENO)"' ERR
+
+  echo "[$(date +%T)] очередь сборки (собирается по одному стенду)"
+  exec 9>"$ROOT/build.lock"; flock 9
+  echo "[$(date +%T)] сборка началась ($kind)"
+
+  if [[ -n $sha ]]; then
+    git -C "$(mirror_of "$repo")" archive "$sha${subdir:+:$subdir}" | tar -C "$d/src" -xf -
+  fi
+
+  "build_$kind" "$name" "$d" || fail "сборка упала — stand status $name"
+  echo "[$(date +%T)] сборка готова, запуск"
+  flock -u 9
+
+  "run_$kind" "$name" "$d" || fail "контейнер не запустился — stand logs $name"
+
+  # Фронт epus обязан отдать страницу; API и прочее может ответить на / и 404 — главное, что живо.
+  local i code=000 ok='^[23]'
+  [[ $kind == epus-frontend ]] || ok='^[234]'
+  for ((i = 0; i < 60; i++)); do
+    code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$port/" || true)
+    [[ $code =~ $ok ]] && break
+    sleep 2
+  done
+  if [[ ! $code =~ $ok ]]; then
+    docker logs --tail 40 "stand-$name" 2>&1 || true
+    fail "стенд не ответил (последний HTTP $code) — stand logs $name"
+  fi
+  trap - ERR
+  meta_set "$name" status running
+  meta_set "$name" build_pid ""
+  echo "[$(date +%T)] готово: https://$name.$DOMAIN (HTTP $code)"
+}
+
+cmd_wait() {
+  local name=${1:-} limit=${2:-900} st i
+  [[ -n $name ]] || die "stand wait <имя> [секунд]"; name=${name,,}; valid_name "$name"; need "$name"
+  [[ $limit =~ ^[0-9]{1,5}$ ]] || die "секунды — число"
+  for ((i = 0; i <= limit; i += 5)); do
+    st=$(meta_get "$name" status)
+    [[ $st == building ]] || break
+    sleep 5
+  done
+  cmd_status "$name"
+  [[ $st == running ]]
+}
+
+cmd_status() {
+  local name=${1:-}; [[ -n $name ]] || die "stand status <имя>"; name=${name,,}; valid_name "$name"; need "$name"
+  local port kind; port=$(meta_get "$name" port); kind=$(meta_get "$name" kind); kind=${kind:-$DEFAULT_KIND}
+  printf '%-9s %s\n' статус "$(meta_get "$name" status)" вид "$kind" источник "$(meta_get "$name" source)"
+  if [[ $kind == epus-frontend ]]; then
+    printf '%-9s %s\n' бэк "$(meta_get "$name" env)" сайт "$(meta_get "$name" site)"
+  fi
+  local sec; sec=$(meta_get "$name" secrets); [[ -z $sec ]] || printf '%-9s %s\n' секреты "$sec"
+  if [[ $kind == compose ]]; then
+    printf '%-9s %s\n' наружу "$(meta_get "$name" web)"
+    [[ ! -s $(dir_of "$name")/vars.env ]] || printf '%-9s %s\n' var "$(cut -d= -f1 "$(dir_of "$name")/vars.env" | tr '\n' ' ')"
+    compose "$name" ps --format 'table {{.Service}}\t{{.Status}}' 2>/dev/null || true
+  fi
+  [[ -z $(meta_get "$name" follow) ]] || printf '%-9s %s\n' следит "за веткой $(meta_get "$name" ref), пересборка на новый коммит"
+  printf '%-9s %s\n' задача "$(meta_get "$name" issue)" \
+    адрес "https://$name.$DOMAIN" локально "http://127.0.0.1:$port" \
+    до "$(date -d "@$(meta_get "$name" expires)" '+%F %R')"
+  local err; err=$(meta_get "$name" error); [[ -z $err ]] || echo "ошибка    $err"
+  echo "--- лог сборки (хвост) ---"
+  tail -n 25 "$(dir_of "$name")/build.log" 2>/dev/null || true
+}
+
+cmd_logs() {
+  local name=${1:-} n=${2:-100} svc=${3:-}; [[ -n $name ]] || die "stand logs <имя> [строк] [сервис]"
+  name=${name,,}; valid_name "$name"; need "$name"; [[ $n =~ ^[0-9]{1,5}$ ]] || die "строк — число"
+  if [[ $(meta_get "$name" kind) == compose && -f $(dir_of "$name")/compose.json && $(meta_get "$name" status) != building ]]; then
+    [[ -z $svc || $svc =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$ ]] || die "сервис '$svc' недопустим"
+    compose "$name" logs --no-color --tail "$n" ${svc:+"$svc"} 2>&1
+  elif docker inspect "stand-$name" >/dev/null 2>&1; then
+    docker logs --tail "$n" "stand-$name" 2>&1
+  else
+    tail -n "$n" "$(dir_of "$name")/build.log"
+  fi
+}
+
+cmd_exec() { # команда в контейнере стенда: миграции, CLI приложения, psql
+  local name=${1:-} svc="" t=120; [[ -n $name ]] || die "stand exec <имя> [--service <с>] [--timeout <сек>] -- <команда…>"
+  shift; name=${name,,}; valid_name "$name"; need "$name"
+  while (($#)) && [[ $1 != -- ]]; do
+    case $1 in
+      --service) svc=${2:-}; shift 2 ;;
+      --timeout) t=${2:-}; shift 2 ;;
+      *) die "неизвестный аргумент '$1' (команду — после --)" ;;
+    esac
+  done
+  (($#)) && shift
+  (($#)) || die "нет команды: stand exec $name -- <команда…>"
+  [[ $t =~ ^[0-9]{1,4}$ ]] && ((t >= 1 && t <= EXEC_TIMEOUT_MAX)) || die "--timeout: от 1 до $EXEC_TIMEOUT_MAX"
+  [[ $(meta_get "$name" status) == running ]] || die "стенд $name не запущен (stand status $name)"
+  if [[ $(meta_get "$name" kind) == compose ]]; then
+    svc=${svc:-$(meta_get "$name" web)}
+    [[ $svc =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$ ]] || die "сервис '$svc' недопустим"
+    timeout "$t" docker compose -p "stand-$name" --project-directory "$(dir_of "$name")" --env-file /dev/null \
+      -f "$(dir_of "$name")/compose.json" exec -T "$svc" "$@" </dev/null
+  else
+    [[ -z $svc ]] || die "--service только для compose"
+    timeout "$t" docker exec "stand-$name" "$@" </dev/null
+  fi
+}
+
+cmd_list() {
+  local d name kind
+  printf '%-16s %-9s %-13s %-40s %-10s %s\n' NAME STATUS KIND SOURCE OWNER UNTIL
+  for d in "$STANDS"/*/; do
+    [[ -f $d/meta.env ]] || continue
+    name=$(basename "$d"); kind=$(meta_get "$name" kind)
+    printf '%-16s %-9s %-13s %-40s %-10s %s\n' "$name" "$(meta_get "$name" status)" "${kind:-$DEFAULT_KIND}" \
+      "$(meta_get "$name" source | cut -c1-40)" \
+      "$(meta_get "$name" owner | cut -c1-10)" "$(date -d "@$(meta_get "$name" expires)" '+%m-%d %R')"
+  done
+}
+
+cmd_repos() {
+  awk '(NF == 2 || NF == 3) && $1 !~ /^#/ { printf "%-14s %s\n", $1, $2 }' "$REPOS_CONF"
+  echo "секреты: $(cd "$SECRETS" 2>/dev/null && ls -- *.env 2>/dev/null | sed 's/\.env$//' | tr '\n' ' ')"
+}
+
+# ---------- артефакты ----------
+
+art_dir() { echo "$ARTS/$1"; }
+ameta_get() { # имя ключ
+  local f; f="$(art_dir "$1")/meta.env"; [[ -f $f ]] || return 0
+  sed -n "s/^$2=//p" "$f" | tail -1
+}
+ameta_set() { # имя ключ значение
+  local f tmp; f="$(art_dir "$1")/meta.env"; tmp="$f.tmp.$$"
+  [[ $3 != *$'\n'* ]] || die "meta: перевод строки в значении"
+  { [[ -f $f ]] && grep -v "^$2=" "$f" || true; echo "$2=$3"; } >"$tmp"
+  chmod 644 "$tmp"; mv "$tmp" "$f"
+}
+valid_art() { [[ $1 =~ ^art-[a-z0-9][a-z0-9-]{0,62}$ ]] || die "артефакт '$1': ожидается art-[a-z0-9-]"; }
+
+art_slug() { # текст → [a-z0-9-], кириллица транслитом
+  python3 -c '
+import re, sys
+t = sys.argv[1].lower()
+tr = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+  ["a","b","v","g","d","e","e","zh","z","i","y","k","l","m","n","o","p","r","s","t","u","f","h","ts","ch","sh","sch","","y","","e","yu","ya"]))
+t = "".join(tr.get(c, c) for c in t)
+t = re.sub(r"[^a-z0-9]+", "-", t).strip("-")[:30].strip("-")
+print(t or "page")' "$1"
+}
+
+art_render() { # оболочка выход заголовок исходник
+  python3 -c '
+import html, sys
+shell, out, title, source = sys.argv[1:5]
+s = open(shell, encoding="utf-8").read()
+s = s.replace("__TITLE__", html.escape(title)).replace("__SOURCE__", source)
+open(out, "w", encoding="utf-8").write(s)' "$1" "$2" "$3" "$4"
+}
+
+cmd_art() {
+  local sub=${1:-help}; shift || true
+  case $sub in
+    publish) art_publish "$@" ;;
+    list) art_list ;;
+    rm)
+      local n=${1:-}; valid_art "$n"; [[ -d $(art_dir "$n") ]] || die "артефакта '$n' нет"
+      rm -rf -- "$(art_dir "$n")"; echo "артефакт $n удалён" ;;
+    *) usage; exit 2 ;;
+  esac
+}
+
+art_publish() {
+  local src=${1:-} name="" title="" ttl=$ART_TTL_DAYS issue=""
+  [[ -n $src ]] || die "stand art publish <файл|каталог> [--name …]"; shift
+  while (($#)); do
+    case $1 in
+      --name) name=${2:-}; shift 2 ;;
+      --title) title=${2:-}; shift 2 ;;
+      --ttl) ttl=${2:-}; shift 2 ;;
+      --issue) issue=${2:-}; shift 2 ;;
+      *) die "неизвестный аргумент '$1'" ;;
+    esac
+  done
+  [[ $ttl =~ ^[0-9]{1,3}$ ]] && ((ttl >= 1 && ttl <= ART_TTL_MAX)) || die "--ttl: от 1 до $ART_TTL_MAX дней"
+  [[ -z $issue ]] || valid_issue "$issue"
+  [[ ${#title} -le 200 && $title != *$'\n'* ]] || die "--title: одна строка до 200 символов"
+  [[ $src == /* ]] || die "нужен абсолютный путь"
+  src=$(realpath -e -- "$src") || die "'$src' не найден"
+  local who=${SUDO_USER:-root}
+
+  local type ext="" base
+  base=$(basename -- "$src")
+  if [[ -d $src ]]; then
+    type=dir
+    sudo -u "$who" test -f "$src/index.html" || die "в каталоге нет index.html"
+  else
+    ext=${base##*.}; ext=${ext,,}
+    case $ext in
+      html | htm) type=html ;;
+      jsx | tsx) type=react ;;
+      md | markdown) type=markdown ;;
+      mmd | mermaid) type=mermaid ;;
+      svg) type=svg ;;
+      *) die "тип .$ext не поддерживается: html, jsx, tsx, md, mmd, svg или каталог с index.html" ;;
+    esac
+  fi
+  mkdir -p "$ARTS"; chmod 755 "$ARTS"
+  if [[ -z $title ]]; then
+    if [[ $name == art-* ]]; then title=$(ameta_get "$name" title); fi
+    [[ -n $title || -z $name || $name == art-* ]] || title=$name
+    [[ -n $title ]] || title=${base%.*}
+  fi
+  if [[ $name == art-* ]]; then
+    valid_art "$name"; [[ -d $(art_dir "$name") ]] || die "артефакта '$name' нет — для нового укажите --name без art-"
+  else
+    local count; count=$(find "$ARTS" -mindepth 1 -maxdepth 1 -type d -name 'art-*' | wc -l)
+    ((count < ART_MAX_COUNT)) || die "уже $ART_MAX_COUNT артефактов — удалите лишние (stand art list / rm)"
+    local rnd; rnd=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n' | cut -c1-6)
+    name="art-$(art_slug "${name:-$title}")-$rnd"
+  fi
+
+  local tmp="$ARTS/.tmp-$name-$$"
+  rm -rf "$tmp"; mkdir -p "$tmp/site"
+  # Копируем правами того, кто позвал: root не должен читать за агента чужое.
+  if [[ $type == dir ]]; then
+    sudo -u "$who" tar -C "$src" --exclude=./node_modules --exclude=./.git -cf - . |
+      tar -C "$tmp/site" --no-same-owner --no-same-permissions -xf - ||
+      { rm -rf "$tmp"; die "не удалось скопировать (нет прав у $who?)"; }
+  else
+    local target
+    case $type in
+      html) target=index.html ;;
+      react) target="app.$ext" ;;
+      markdown) target=doc.md ;;
+      mermaid) target=diagram.mmd ;;
+      svg) target=image.svg ;;
+    esac
+    sudo -u "$who" cat -- "$src" >"$tmp/site/$target" || { rm -rf "$tmp"; die "не удалось прочитать (нет прав у $who?)"; }
+    [[ $type == html ]] || art_render "$SHELLS/$type.html" "$tmp/site/index.html" "$title" "$target"
+  fi
+  if [[ -n $(find "$tmp/site" -type l -print -quit) ]]; then rm -rf "$tmp"; die "в артефакте есть символические ссылки — нельзя"; fi
+  local bytes files
+  bytes=$(du -sb "$tmp/site" | cut -f1); files=$(find "$tmp/site" -type f | wc -l)
+  ((bytes <= ART_MAX_BYTES)) || { rm -rf "$tmp"; die "артефакт $((bytes / 1024 / 1024)) МБ — больше 20 МБ"; }
+  ((files <= ART_MAX_FILES)) || { rm -rf "$tmp"; die "в артефакте $files файлов — больше $ART_MAX_FILES"; }
+  chown -R root:root "$tmp/site"; chmod -R u=rwX,go=rX "$tmp/site"
+
+  local d; d=$(art_dir "$name"); mkdir -p "$d"; chmod 755 "$d"
+  rm -rf "$d/site.old"; [[ ! -d $d/site ]] || mv "$d/site" "$d/site.old"
+  mv "$tmp/site" "$d/site"; rm -rf "$d/site.old" "$tmp"
+
+  local now ver; now=$(date +%s); ver=$(ameta_get "$name" version)
+  [[ -n $(ameta_get "$name" created) ]] || ameta_set "$name" created "$now"
+  ameta_set "$name" name "$name"
+  ameta_set "$name" title "$title"
+  ameta_set "$name" type "$type"
+  ameta_set "$name" version $((${ver:-0} + 1))
+  ameta_set "$name" issue "$issue"
+  ameta_set "$name" owner "${MULTICA_AGENT_NAME:-$who}"
+  ameta_set "$name" task "${MULTICA_TASK_ID:-}"
+  ameta_set "$name" updated "$now"
+  ameta_set "$name" expires $((now + ttl * 86400))
+  echo "https://$name.$DOMAIN"
+  echo "артефакт $name: $type, версия $(ameta_get "$name" version), до $(date -d "@$((now + ttl * 86400))" '+%F')" >&2
+}
+
+art_list() {
+  local d name
+  printf '%-40s %-8s %-3s %-12s %-10s %s\n' NAME TYPE VER OWNER UNTIL TITLE
+  for d in "$ARTS"/art-*/; do
+    [[ -f $d/meta.env ]] || continue
+    name=$(basename "$d")
+    printf '%-40s %-8s %-3s %-12s %-10s %s\n' "$name" "$(ameta_get "$name" type)" "$(ameta_get "$name" version)" \
+      "$(ameta_get "$name" owner | cut -c1-12)" "$(date -d "@$(ameta_get "$name" expires)" '+%F')" \
+      "$(ameta_get "$name" title | cut -c1-50)"
+  done
+}
+
+remove() {
+  local name=$1 d pid; d=$(dir_of "$name")
+  pid=$(meta_get "$name" build_pid)
+  [[ -n $pid ]] && kill -- "-$pid" 2>/dev/null || true
+  docker rm -f "stand-$name" "stand-build-$name" >/dev/null 2>&1 || true
+  docker image rm -f "stand-img-$name" >/dev/null 2>&1 || true
+  compose_down "$name" -v
+  rm -rf "$d"
+}
+
+cmd_down() {
+  local name=${1:-}; [[ -n $name ]] || die "stand down <имя>"; name=${name,,}; valid_name "$name"; need "$name"
+  remove "$name"; echo "стенд $name удалён"
+}
+
+cmd_follow() { # таймер: пересобрать стенды с --follow, если в ветке новый коммит
+  [[ $EUID -eq 0 && -z ${SUDO_USER:-} ]] || die "follow запускает только таймер"
+  local d name repo ref sha new stale fetched=" "
+  local -a args
+  for d in "$STANDS"/*/; do
+    [[ -f $d/meta.env ]] || continue
+    name=$(basename "$d")
+    [[ -n $(meta_get "$name" follow) ]] || continue
+    stale=""
+    if [[ $(meta_get "$name" status) == building ]]; then
+      ! build_alive "$name" || continue
+      stale=1
+    fi
+    repo=$(meta_get "$name" repo); ref=$(meta_get "$name" ref); sha=$(meta_get "$name" sha)
+    [[ -n $repo && -n $ref ]] || continue
+    if [[ $fetched != *" $repo "* ]]; then
+      (mirror_fetch "$repo") || { echo "follow: $repo — fetch не удался"; continue; }
+      fetched+="$repo "
+    fi
+    new=$(git -C "$(mirror_of "$repo")" rev-parse -q --verify "refs/heads/$ref^{commit}" 2>/dev/null || true)
+    [[ -n $new ]] || { echo "follow: $name — ветки $ref больше нет"; continue; }
+    [[ $new != "$sha" || -n $stale ]] || continue
+    args=(up "$name" --ref "$ref" --repo "$repo" --kind "$(meta_get "$name" kind)" --follow)
+    local k v s
+    for k in subdir publish app_port site env issue service compose_file ttl; do
+      v=$(meta_get "$name" "$k"); [[ -z $v ]] || args+=("--${k//_/-}" "$v")
+    done
+    for s in $(meta_get "$name" secrets); do args+=(--secret "$s"); done
+    if [[ -s $d/vars.env ]]; then while IFS= read -r v; do [[ -n $v ]] && args+=(--var "$v"); done <"$d/vars.env"; fi
+    echo "follow: $name — $ref ${sha:0:10} → ${new:0:10}, пересборка${stale:+ (прошлая сборка умерла)}"
+    # Владелец и задача стенда остаются прежними, а не root.
+    MULTICA_AGENT_NAME=$(meta_get "$name" owner) MULTICA_TASK_ID=$(meta_get "$name" task) \
+      "$0" "${args[@]}" || echo "follow: $name — up не удался"
+  done
+}
+
+cmd_gc() { # таймер: просроченные и стенды закрытых задач
+  [[ $EUID -eq 0 && -z ${SUDO_USER:-} ]] || die "gc запускает только таймер"
+  local d name now issue st
+  now=$(date +%s)
+  for d in "$STANDS"/*/; do
+    [[ -f $d/meta.env ]] || continue
+    name=$(basename "$d")
+    if (($(meta_get "$name" expires) < now)); then
+      remove "$name"; echo "gc: $name — истёк срок"; continue
+    fi
+    issue=$(meta_get "$name" issue); [[ -n $issue ]] || continue
+    st=$(timeout 30 sudo -iu agents multica issue get "$issue" --output json 2>/dev/null |
+      python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))' 2>/dev/null || true)
+    if [[ $st == done || $st == cancelled ]]; then
+      remove "$name"; echo "gc: $name — задача $issue $st"
+    fi
+  done
+  for d in "$ARTS"/art-*/; do
+    [[ -f $d/meta.env ]] || continue
+    name=$(basename "$d")
+    if (($(ameta_get "$name" expires) < now)); then rm -rf -- "$d"; echo "gc: $name — артефакт истёк"; fi
+  done
+  find "$ARTS" -mindepth 1 -maxdepth 1 -name '.tmp-*' -mmin +60 -exec rm -rf {} + 2>/dev/null || true
+}
+
+[[ $EUID -eq 0 ]] || die "запускать через sudo: sudo stand ${*:-help}"
+mkdir -p "$STANDS"
+cmd=${1:-help}; shift || true
+case $cmd in
+  up | wait | status | logs | exec | list | repos | down | gc | follow | art) "cmd_$cmd" "$@" ;;
+  _build) cmd__build "$@" ;;
+  help | -h | --help) usage ;;
+  *) usage; exit 2 ;;
+esac

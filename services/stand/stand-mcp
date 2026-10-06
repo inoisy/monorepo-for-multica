@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""stand-mcp — MCP (stdio) поверх `sudo stand` для агентов multica.
+
+Агент видит типизированные инструменты, а не sudo в Bash. Внутри — только
+`sudo -n /usr/local/bin/stand <подкоманда> …` списком аргументов, без shell;
+проверки ввода и права остаются в самом stand. Зависимостей нет: stdlib.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+STAND = ["sudo", "-n", "/usr/local/bin/stand"]
+PROTOCOL = "2025-06-18"
+WAIT_DEFAULT = 300
+WAIT_MAX = 600
+
+NAME = {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,39}$",
+        "description": "Имя стенда: ключ задачи в нижнем регистре (stt-12) или короткое [a-z0-9-]"}
+
+TOOLS = [
+    {
+        "name": "stand_up",
+        "description": (
+            "Собрать и поднять стенд на https://<name>.stand.yakutov.com. Возвращается сразу, "
+            "сборка идёт в фоне — дальше stand_wait. Ветку сначала запушить. "
+            "kind=compose — сервис с БД из docker-compose ветки (как `docker compose up`). "
+            "Повторный up с тем же name пересобирает стенд на том же адресе."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": NAME,
+                "ref": {"type": "string", "description": "Ветка или коммит в git01"},
+                "path": {"type": "string", "description": "Абсолютный путь к рабочей копии на сервере (вместо ref, берётся с незакоммиченным)"},
+                "kind": {"type": "string", "enum": ["epus-frontend", "node", "static", "docker", "compose"],
+                         "description": "Вид стенда, по умолчанию epus-frontend"},
+                "repo": {"type": "string", "description": "Алиас репозитория из stand_repos, по умолчанию frontend"},
+                "subdir": {"type": "string", "description": "Подкаталог репозитория (монорепо)"},
+                "env": {"type": "string", "enum": ["dev", "stage"],
+                        "description": "Только epus-frontend: чей бэк, по умолчанию dev. Запекается в сборку"},
+                "site": {"type": "string", "description": "Только epus-frontend: сайт, по умолчанию azgaz"},
+                "issue": {"type": "string", "description": "Ключ задачи multica (STT-12), если name — не ключ"},
+                "publish": {"type": "string", "description": "Только static: каталог статики"},
+                "app_port": {"type": "integer", "description": "docker/compose: порт внутри контейнера, если нет EXPOSE/ports"},
+                "service": {"type": "string", "description": "Только compose: какой сервис открыть наружу (если не очевидно)"},
+                "compose_file": {"type": "string", "description": "Только compose: путь к compose-файлу в репо, по умолчанию compose.yaml/docker-compose.yml"},
+                "vars": {"type": "object", "additionalProperties": {"type": "string"},
+                         "description": "Только compose: значения для ${VAR} в compose-файле, не секреты. "
+                                        "STAND_URL и STAND_NAME есть всегда; ${VAR:?} без значения — случайное, "
+                                        "сохраняется между пересборками"},
+                "ttl_hours": {"type": "integer", "minimum": 1, "maximum": 168,
+                              "description": "Сколько часов живёт стенд, по умолчанию 48"},
+                "secrets": {"type": "array", "items": {"type": "string"},
+                            "description": "Имена наборов переменных из stand_repos"},
+                "follow": {"type": "boolean",
+                           "description": "Только с ref на ветку: пересобирать стенд на каждый новый коммит в ветке (проверка раз в 2 минуты)"},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "stand_wait",
+        "description": (
+            f"Ждать окончания сборки до seconds секунд (по умолчанию {WAIT_DEFAULT}, максимум {WAIT_MAX}). "
+            "Первая строка ответа: READY, BUILDING (вызови ещё раз) или FAILED (см. хвост лога)."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": NAME,
+                           "seconds": {"type": "integer", "minimum": 5, "maximum": WAIT_MAX}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "stand_status",
+        "description": "Состояние стенда: статус, источник, адрес, срок жизни, ошибка и хвост лога сборки.",
+        "inputSchema": {"type": "object", "properties": {"name": NAME},
+                        "required": ["name"], "additionalProperties": False},
+    },
+    {
+        "name": "stand_logs",
+        "description": "Логи работающего стенда (SSR-ошибки) или лог сборки, если контейнера нет. "
+                       "compose: service — логи одного сервиса, без него — всех.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": NAME,
+                           "lines": {"type": "integer", "minimum": 1, "maximum": 2000},
+                           "service": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "stand_exec",
+        "description": (
+            "Выполнить команду в работающем контейнере стенда и вернуть вывод: CLI приложения, "
+            "миграции, psql в сервисе БД. Аналог `docker compose exec -T <service> …`. "
+            "service — только для compose, по умолчанию сервис, открытый наружу."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": NAME,
+                "command": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                            "description": "argv без shell, напр. [\"pnpm\", \"create-lead-link\", \"--dept\", \"152\"]; "
+                                           "shell — [\"sh\", \"-c\", \"…\"]"},
+                "service": {"type": "string"},
+                "timeout": {"type": "integer", "minimum": 1, "maximum": 600,
+                            "description": "Секунд, по умолчанию 120"},
+            },
+            "required": ["name", "command"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "stand_list",
+        "description": "Все стенды: имя, статус, вид, источник, владелец, срок. Чужие не трогать.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "stand_repos",
+        "description": "Какие репозитории можно ставить (алиасы для repo) и какие есть наборы секретов.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "stand_down",
+        "description": "Остановить и удалить стенд. Только свой.",
+        "inputSchema": {"type": "object", "properties": {"name": NAME},
+                        "required": ["name"], "additionalProperties": False},
+    },
+    {
+        "name": "art_publish",
+        "description": (
+            "Опубликовать статический артефакт без сборки: .jsx/.tsx (React, export default), .html, .md, "
+            ".mmd, .svg или каталог с index.html. Адрес https://art-<имя>-<суффикс>.stand.yakutov.com. "
+            "name вида art-… обновляет существующий артефакт по тому же адресу."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Абсолютный путь к файлу или каталогу"},
+                "name": {"type": "string"},
+                "title": {"type": "string"},
+                "ttl_days": {"type": "integer", "minimum": 1},
+                "issue": {"type": "string"},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "art_list",
+        "description": "Все артефакты.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "art_rm",
+        "description": "Удалить артефакт (art-…). Только свой.",
+        "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}},
+                        "required": ["name"], "additionalProperties": False},
+    },
+]
+
+
+class ToolError(Exception):
+    pass
+
+
+def val(args, key, kind=str):
+    v = args.get(key)
+    if v is None or v == "":
+        return None
+    if kind is int:
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ToolError(f"{key}: ожидается целое число")
+        return str(v)
+    if not isinstance(v, str):
+        raise ToolError(f"{key}: ожидается строка")
+    # Значение не должно прикинуться флагом stand.
+    if v.startswith("-") or "\n" in v:
+        raise ToolError(f"{key}: недопустимое значение")
+    return v
+
+
+def name_of(args):
+    n = val(args, "name")
+    if not n or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", n.lower()):
+        raise ToolError("name: [a-z0-9-], до 40 символов")
+    return n.lower()
+
+
+def stand(argv, timeout=120):
+    try:
+        p = subprocess.run(STAND + argv, stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ToolError(f"stand {argv[0]}: не ответил за {timeout} с")
+    out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", p.stdout + p.stderr).strip()
+    if len(out) > 60000:
+        out = "…(обрезано)\n" + out[-60000:]
+    return p.returncode, out
+
+
+def call(tool, args):
+    if tool == "stand_up":
+        argv = ["up", name_of(args)]
+        for key, flag, kind in [("ref", "--ref", str), ("path", "--path", str), ("kind", "--kind", str),
+                                ("repo", "--repo", str), ("subdir", "--subdir", str), ("env", "--env", str),
+                                ("site", "--site", str), ("issue", "--issue", str),
+                                ("publish", "--publish", str), ("app_port", "--app-port", int),
+                                ("service", "--service", str), ("compose_file", "--compose-file", str),
+                                ("ttl_hours", "--ttl", int)]:
+            v = val(args, key, kind)
+            if v is not None:
+                argv += [flag, v]
+        secrets = args.get("secrets") or []
+        if not isinstance(secrets, list):
+            raise ToolError("secrets: ожидается список строк")
+        for s in secrets:
+            argv += ["--secret", val({"s": s}, "s")]
+        vars_ = args.get("vars") or {}
+        if not isinstance(vars_, dict):
+            raise ToolError("vars: ожидается объект {KEY: значение}")
+        for k, v in vars_.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(k)) or not isinstance(v, str) or "\n" in v:
+                raise ToolError(f"vars.{k}: имя [A-Za-z_][A-Za-z0-9_]*, значение — строка в одну строку")
+            argv += ["--var", f"{k}={v}"]
+        if args.get("follow") is True:
+            argv.append("--follow")
+        code, out = stand(argv)
+        return code != 0, out + ("" if code else "\n\nСборка запущена — дальше stand_wait.")
+
+    if tool == "stand_wait":
+        name = name_of(args)
+        sec = args.get("seconds", WAIT_DEFAULT)
+        if isinstance(sec, bool) or not isinstance(sec, int) or not 5 <= sec <= WAIT_MAX:
+            raise ToolError(f"seconds: от 5 до {WAIT_MAX}")
+        code, out = stand(["wait", name, str(sec)], timeout=sec + 60)
+        m = re.search(r"^статус\s+(\S+)", out, re.M)
+        status = m.group(1) if m else ""
+        if code == 0:
+            head = "READY"
+        elif status == "building":
+            head = "BUILDING — сборка ещё идёт, вызови stand_wait снова"
+        else:
+            head = f"FAILED ({status or 'нет статуса'})"
+        return head.startswith("FAILED"), f"{head}\n\n{out}"
+
+    if tool == "stand_status":
+        code, out = stand(["status", name_of(args)])
+    elif tool == "stand_logs":
+        argv = ["logs", name_of(args), val(args, "lines", int) or "100"]
+        svc = val(args, "service")
+        if svc:
+            argv.append(svc)
+        code, out = stand(argv)
+    elif tool == "stand_exec":
+        cmd = args.get("command")
+        if not isinstance(cmd, list) or not cmd or not all(isinstance(x, str) for x in cmd):
+            raise ToolError("command: непустой список строк")
+        t = args.get("timeout", 120)
+        if isinstance(t, bool) or not isinstance(t, int) or not 1 <= t <= 600:
+            raise ToolError("timeout: от 1 до 600")
+        argv = ["exec", name_of(args), "--timeout", str(t)]
+        svc = val(args, "service")
+        if svc:
+            argv += ["--service", svc]
+        code, out = stand(argv + ["--"] + cmd, timeout=t + 30)
+        out = f"exit {code}\n{out}"
+    elif tool == "stand_list":
+        code, out = stand(["list"])
+    elif tool == "stand_repos":
+        code, out = stand(["repos"])
+    elif tool == "stand_down":
+        code, out = stand(["down", name_of(args)])
+    elif tool == "art_publish":
+        path = val(args, "path")
+        if not path or not path.startswith("/"):
+            raise ToolError("path: нужен абсолютный путь")
+        argv = ["art", "publish", path]
+        for key, flag, kind in [("name", "--name", str), ("title", "--title", str),
+                                ("ttl_days", "--ttl", int), ("issue", "--issue", str)]:
+            v = val(args, key, kind)
+            if v is not None:
+                argv += [flag, v]
+        code, out = stand(argv, timeout=300)
+    elif tool == "art_list":
+        code, out = stand(["art", "list"])
+    elif tool == "art_rm":
+        n = val(args, "name")
+        if not n:
+            raise ToolError("name обязателен")
+        code, out = stand(["art", "rm", n])
+    else:
+        raise ToolError(f"нет инструмента {tool}")
+    return code != 0, out or "(пусто)"
+
+
+def reply(msg_id, result=None, error=None):
+    msg = {"jsonrpc": "2.0", "id": msg_id}
+    if error:
+        msg["error"] = error
+    else:
+        msg["result"] = result
+    sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def handle(msg):
+    method, msg_id = msg.get("method"), msg.get("id")
+    if msg_id is None:  # уведомление
+        return
+    if method == "initialize":
+        client = (msg.get("params") or {}).get("protocolVersion") or PROTOCOL
+        reply(msg_id, {"protocolVersion": client,
+                       "capabilities": {"tools": {}},
+                       "serverInfo": {"name": "stand", "version": "1.1.0"}})
+    elif method == "ping":
+        reply(msg_id, {})
+    elif method == "tools/list":
+        reply(msg_id, {"tools": TOOLS})
+    elif method == "tools/call":
+        params = msg.get("params") or {}
+        try:
+            is_error, text = call(params.get("name"), params.get("arguments") or {})
+        except ToolError as e:
+            is_error, text = True, str(e)
+        reply(msg_id, {"content": [{"type": "text", "text": text}], "isError": is_error})
+    else:
+        reply(msg_id, error={"code": -32601, "message": f"method not found: {method}"})
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            reply(None, error={"code": -32700, "message": "parse error"})
+            continue
+        try:
+            handle(msg)
+        except Exception as e:  # сервер не должен падать из-за одного вызова
+            if msg.get("id") is not None:
+                reply(msg["id"], error={"code": -32603, "message": str(e)})
+
+
+if __name__ == "__main__":
+    main()

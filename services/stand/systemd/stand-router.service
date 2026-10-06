@@ -1,0 +1,16 @@
+[Unit]
+Description=Маршрутизация *.stand.yakutov.com на стенды
+After=network.target
+
+[Service]
+User=stand
+Group=stand
+ExecStart=/usr/bin/python3 /opt/stand/stand-router.py
+Restart=always
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

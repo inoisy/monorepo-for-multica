@@ -1,0 +1,9 @@
+[Unit]
+Description=Пересборка стендов с --follow на новый коммит в ветке
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/stand follow
+# stand up уводит сборку в фон и выходит. С control-group по умолчанию systemd
+# убивает её вместе с юнитом, и стенд навсегда остаётся в building.
+KillMode=process

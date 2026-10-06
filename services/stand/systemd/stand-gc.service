@@ -1,0 +1,6 @@
+[Unit]
+Description=Уборка стендов: истёк срок или задача закрыта
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/stand gc
