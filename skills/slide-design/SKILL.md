@@ -1,6 +1,6 @@
 ---
 name: slide-design
-description: Use when asked to make a presentation, slide deck, pitch, review, report-as-slides, or "слайды/презентацию/деку". Builds decks through the `slides` MCP server (deck_create, slides_set, deck_check, deck_preview, deck_export) and covers how to make them look designed: narrative, layout choice, bento composition, copy, and the visual self-review loop.
+description: Use when asked to make a presentation, slide deck, pitch, review, report-as-slides, or "слайды/презентацию/деку". Builds decks through the `slides` MCP server (deck_create, slides_set, deck_check, deck_preview, deck_bundle) and publishes them with the `stand` MCP server (art_publish). Covers how to make them look designed: narrative, layout choice, bento composition, copy, and the visual self-review loop.
 ---
 
 # Slide design
@@ -35,8 +35,33 @@ hand-written HTML or a .pptx library.
 7. **Look:** `deck_preview` on every slide (12 per call). Judge each one
    against the review checklist below, fix with `slide_upsert`, then preview
    again. Expect two rounds. One round means you didn't look hard enough.
-8. **Ship:** `deck_export` as `pdf` (plus `pptx` if asked). Post the preview URL
-   and the PDF link in the issue, with a 2–3 line summary of the storyline.
+8. **Publish** (see below) and post the link in the issue with a 2–3 line
+   summary of the storyline. If someone asks for a file, also `deck_export` as
+   `pptx` or `pdf`.
+
+## Publishing (deploy)
+
+Every finished deck gets a public link on the stand. Publish it yourself;
+don't ask a person to deploy it.
+
+1. `deck_bundle` with the deck `id`. It writes a self-contained static site
+   (presenter view, embedded fonts, assets, and a `deck.pdf` behind a
+   "PDF ↓" button) and returns its absolute path plus ready-made
+   `art_publish` arguments.
+2. `art_publish` (stand MCP) with those arguments. Add `issue` with the
+   Multica issue key so the artifact is tied to the task. The tool returns
+   `https://art-<name>-<suffix>.stand.yakutov.com`, which lives 90 days by
+   default (`ttl` up to 365).
+3. `deck_update` with `published_url` set to that link. The deck remembers it,
+   and the next `deck_bundle` hands you `name: art-…`, so republishing after
+   edits **keeps the same address**. Always republish to the existing name
+   rather than creating a second artifact.
+
+If `art_publish` refuses with "больше 20 МБ", the images are too heavy:
+replace them with smaller ones, or run `deck_bundle` with
+`include_pdf: false`. If the stand tools are missing, post the slides
+preview URL and the PDF from `deck_export` instead, and say that publishing
+wasn't available.
 
 ## Theme by mood
 

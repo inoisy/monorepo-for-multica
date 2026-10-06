@@ -14,6 +14,10 @@ RUN npm install -g pnpm@10.5.2
 COPY pnpm-lock.yaml package.json ./
 RUN pnpm install --frozen-lockfile --prod
 COPY --from=builder /app/dist ./dist
-ENV SLIDES_DIR=/data/decks
+# Theme fonts are committed (fonts/, OFL): decks and PDFs render with the real
+# typefaces without reaching Google Fonts at runtime.
+COPY fonts ./fonts
+ENV SLIDES_DIR=/data/decks \
+    SLIDES_BUNDLE_DIR=/data/bundles
 VOLUME /data
 CMD ["node", "dist/index.js", "--http"]

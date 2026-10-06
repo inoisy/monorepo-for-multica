@@ -21,7 +21,8 @@ function getBrowser(): Promise<Browser> {
   if (!browser) {
     browser = chromium.launch({
       executablePath: process.env.SLIDES_CHROMIUM_PATH || undefined,
-      args: ['--font-render-hinting=none'],
+      // file:// pages load fonts from ../_fonts, which Chromium treats as cross-origin without this flag.
+      args: ['--font-render-hinting=none', '--allow-file-access-from-files'],
       ...launchExtra,
     });
     browser.catch(() => { browser = null; });
@@ -81,7 +82,11 @@ const CHECK_SCRIPT = `(() => {
     brokenImages: [...s.querySelectorAll('img')].filter(img => !img.naturalWidth).map(img => img.getAttribute('src') || ''),
   }));
   const display = getComputedStyle(document.documentElement).getPropertyValue('--font-display').split(',')[0].trim();
-  return { fontsLoaded: document.fonts.check('600 40px ' + display), slides };
+  // document.fonts.check() is true when no face matches at all (stylesheet
+  // never loaded), so look for an actually loaded face of the display family.
+  const family = display.replace(/['"]/g, '');
+  const fontsLoaded = [...document.fonts].some(f => f.family.replace(/['"]/g, '') === family && f.status === 'loaded');
+  return { fontsLoaded, slides };
 })()`;
 
 /** PNG per slide. `scale` < 1 makes smaller previews (cheaper for an agent to look at). */

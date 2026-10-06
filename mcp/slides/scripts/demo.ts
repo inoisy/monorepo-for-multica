@@ -9,13 +9,17 @@ import { lintDeck } from '../src/lint.js';
 import { checkRender, closeBrowser, configureBrowser, screenshots } from '../src/browser.js';
 import { exportDeck } from '../src/export.js';
 import type { Deck } from '../src/schema.js';
+import { findFonts } from '../src/fonts.js';
 
 const theme = (process.argv[2] ?? 'graphite') as Deck['theme'];
 const out = path.resolve(process.argv[3] ?? './data/demo');
-const proxy = process.env.HTTPS_PROXY;
+// Only route the browser through a proxy when asked: by default the demo
+// proves that bundled fonts render with no network at all.
+const proxy = process.env.DEMO_PROXY;
 if (proxy) configureBrowser({ proxy: { server: proxy } }, { ignoreHTTPSErrors: true });
 
-const store = new DeckStore(path.join(out, 'decks'));
+const store = new DeckStore(path.join(out, 'decks'), await findFonts());
+await store.init();
 
 const art = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1200"><defs>
 <radialGradient id="a" cx="30%" cy="30%" r="70%"><stop offset="0" stop-color="#8C7CFF"/><stop offset="1" stop-color="#0A0F1F"/></radialGradient>

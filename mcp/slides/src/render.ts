@@ -354,7 +354,11 @@ body.grid .slide{transform-origin:0 0;position:absolute;left:0;top:0}
 body.print .slide{break-after:page}
 @page{size:${SLIDE_W}px ${SLIDE_H}px;margin:0}
 .hud{position:fixed;bottom:16px;right:20px;font:13px/1 system-ui;color:#888;z-index:10;user-select:none}
-body:not(.present) .hud{display:none}
+body:not(.present) .hud,body:not(.present) .hud-pdf{display:none}
+.hud-pdf{position:fixed;bottom:12px;left:20px;font:13px/1 system-ui;color:#aaa;z-index:10;text-decoration:none;padding:6px 10px;border:1px solid #333;border-radius:6px;background:rgba(0,0,0,.4)}
+.hud-pdf:hover{color:#fff;border-color:#666}
+.hud,.hud-pdf{transition:opacity .4s}
+body.idle .hud,body.idle .hud-pdf{opacity:0}
 `;
 
 const SCRIPT = /* js */ `
@@ -405,6 +409,10 @@ const SCRIPT = /* js */ `
     slides.forEach(function(s){s.style.transform='translate(-50%,-50%) scale('+k+')'})}
   function show(i){cur=Math.max(0,Math.min(slides.length-1,i));slides.forEach(function(s,j){s.classList.toggle('active',j===cur)});
     hud.textContent=(cur+1)+' / '+slides.length+'  ·  G — overview';history.replaceState(null,'','#slide='+(cur+1))}
+  // Controls overlap the slide footer when the window is exactly 16:9, so
+  // they only show while the mouse moves.
+  var idle;function wake(){document.body.classList.remove('idle');clearTimeout(idle);idle=setTimeout(function(){document.body.classList.add('idle')},2000)}
+  addEventListener('mousemove',wake);wake();
   addEventListener('resize',scale);
   addEventListener('keydown',function(e){
     if(['ArrowRight','ArrowDown','PageDown',' '].indexOf(e.key)>=0)show(cur+1);
@@ -413,19 +421,29 @@ const SCRIPT = /* js */ `
     else if(e.key==='g'||e.key==='G'){location.hash='grid';location.reload()}
     else if(e.key==='f'||e.key==='F'){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()}
   });
-  addEventListener('click',function(e){show(e.clientX>innerWidth/3?cur+1:cur-1)});
+  addEventListener('click',function(e){if(e.target.closest('a'))return;show(e.clientX>innerWidth/3?cur+1:cur-1)});
   scale();show(cur);
 })();
 `;
 
-export function renderDeck(deck: Deck): string {
+export interface RenderOptions {
+  /** Stylesheet with local @font-face rules (relative to the page). Default: Google Fonts. */
+  fontsHref?: string;
+  /** PDF of the deck next to the page; adds a download link to the presenter HUD. */
+  pdfHref?: string;
+}
+
+export function renderDeck(deck: Deck, opts: RenderOptions = {}): string {
   const theme = THEMES[deck.theme];
-  const fonts = `https://fonts.googleapis.com/css2?${theme.googleFonts.map(f => `family=${f}`).join('&')}&display=block`;
+  const fonts = opts.fontsHref
+    ? `<link rel="stylesheet" href="${attr(opts.fontsHref)}">`
+    : `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>` +
+      `<link rel="stylesheet" href="https://fonts.googleapis.com/css2?${theme.googleFonts.map(f => `family=${f}`).join('&')}&display=block">`;
+  const pdf = opts.pdfHref ? `<a class="hud-pdf" href="${attr(opts.pdfHref)}" download>PDF ↓</a>` : '';
   const slides = deck.slides.length
     ? deck.slides.map((s, i) => slideHtml(deck, s, i)).join('\n')
     : `<section class="slide glow"><div class="content center-y"><div class="eyebrow">Empty deck</div><h1 class="h-l">${esc(deck.title)}</h1></div></section>`;
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
-    `<title>${esc(deck.title)}</title><link rel="preconnect" href="https://fonts.googleapis.com">` +
-    `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="${fonts}">` +
-    `<style>:root{${themeVars(theme)}}${CSS}</style></head><body class="print">${slides}<script>${SCRIPT}</script></body></html>`;
+    `<title>${esc(deck.title)}</title>${fonts}` +
+    `<style>:root{${themeVars(theme)}}${CSS}</style></head><body class="print">${slides}${pdf}<script>${SCRIPT}</script></body></html>`;
 }

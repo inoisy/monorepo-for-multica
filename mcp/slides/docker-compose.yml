@@ -10,7 +10,11 @@ services:
       # The address people and agents open previews at. Change to the host's
       # LAN name or domain so links in Multica issue comments work.
       SLIDES_PUBLIC_URL: ${SLIDES_PUBLIC_URL:-http://localhost:3076}
+      # deck_bundle reports bundle paths as agents on the host see them, so
+      # they can pass the path straight to stand art_publish.
+      SLIDES_BUNDLE_HOST_DIR: ${SLIDES_DATA:-/srv/slides}/bundles
     volumes:
-      - ./data:/data
+      # Absolute host path: agents read bundles from here when publishing.
+      - ${SLIDES_DATA:-/srv/slides}:/data
     shm_size: 1gb
     restart: unless-stopped

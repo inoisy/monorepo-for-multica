@@ -14,10 +14,12 @@
     "typecheck": "tsc --noEmit",
     "dev": "tsx watch src/index.ts --http",
     "test": "vitest run",
-    "demo": "tsx scripts/demo.ts"
+    "demo": "tsx scripts/demo.ts",
+    "fonts": "pnpm build && node scripts/fetch-fonts.mjs fonts"
   },
   "files": [
-    "dist"
+    "dist",
+    "fonts"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

@@ -8,9 +8,15 @@ import { DeckStore } from './store.js';
 import { registerTools } from './tools.js';
 import { closeBrowser } from './browser.js';
 import { esc } from './text.js';
+import { findFonts } from './fonts.js';
 
 const PORT = Number(process.env.PORT ?? 3000);
-const store = new DeckStore(path.resolve(process.env.SLIDES_DIR ?? './data/decks'));
+const dataDir = path.resolve(process.env.SLIDES_DIR ?? './data/decks');
+const store = new DeckStore(dataDir, await findFonts());
+// Bundles for publishing. SLIDES_BUNDLE_HOST_DIR is the same directory as
+// agents on the host see it, when this server runs in a container.
+const bundleDir = path.resolve(process.env.SLIDES_BUNDLE_DIR ?? path.join(dataDir, '..', 'bundles'));
+const bundleHostDir = process.env.SLIDES_BUNDLE_HOST_DIR ?? bundleDir;
 const isHttp = process.argv.includes('--http');
 // Links handed back to agents. In HTTP mode default to localhost; set
 // SLIDES_PUBLIC_URL to the address people actually open (http://host:3076).
@@ -21,11 +27,13 @@ const log = (...a: unknown[]) => console.error('[slides]', ...a);
 
 function createServer(): McpServer {
   const s = new McpServer({ name: 'slides', version: '0.1.0' });
-  registerTools(s, { store, publicUrl });
+  registerTools(s, { store, publicUrl, bundleDir, bundleHostDir });
   return s;
 }
 
 async function main() {
+  await store.init();
+  log(`fonts: ${store.hasLocalFonts ? 'bundled' : 'Google Fonts (no bundled fonts found)'}, bundles: ${bundleHostDir}`);
   if (!isHttp) {
     await createServer().connect(new StdioServerTransport());
     log(`stdio, decks in ${store.root}`);

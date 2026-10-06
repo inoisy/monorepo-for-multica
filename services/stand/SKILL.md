@@ -87,6 +87,10 @@ Playwright MCP: открыть `https://<имя>.stand.yakutov.com`, пройт�
 `.tsx` (React, `export default`), `.html`, `.md`, `.mmd`, `.svg` или каталогу
 с `index.html`. `art_list`, `art_rm` — список и удаление.
 
+Презентация — не руками в HTML: собери деку в MCP `slides` (скилл
+`slide-design`), `deck_bundle` вернёт каталог и готовые аргументы для
+`art_publish`.
+
 ## Отчёт
 
 В комментарий задачи: ссылку на стенд, ветку и коммит, что проверено и

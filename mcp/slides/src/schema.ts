@@ -96,6 +96,11 @@ export const Deck = z.object({
   theme: z.enum(THEME_IDS).default('graphite'),
   footer: z.string().optional().describe('Small text in every slide footer, e.g. company or event name.'),
   slides: z.array(Slide).default([]),
+  published: z.object({
+    name: z.string().regex(/^art-[a-z0-9-]+$/),
+    url: z.string().url(),
+    at: z.string().optional(),
+  }).optional().describe('Where the deck is published (stand artifact). Republishing with this name keeps the URL.'),
 });
 
 export type Deck = z.infer<typeof Deck>;

@@ -3,7 +3,8 @@ import * as z from 'zod';
 import { Deck, Slide } from './schema.js';
 import { THEMES } from './themes.js';
 import { lintDeck, type Issue } from './lint.js';
-import { checkRender, screenshots } from './browser.js';
+import { checkRender, pdf, screenshots } from './browser.js';
+import nodePath from 'node:path';
 import { exportDeck } from './export.js';
 import type { DeckStore } from './store.js';
 
@@ -11,7 +12,14 @@ export interface ToolContext {
   store: DeckStore;
   /** Base URL where the HTTP server serves decks, e.g. http://host:3076. Empty when only stdio runs. */
   publicUrl: string;
+  /** Where deck_bundle writes static sites, as this process sees the filesystem. */
+  bundleDir: string;
+  /** The same directory as the publishing agent sees it (differs when this server runs in Docker). */
+  bundleHostDir: string;
 }
+
+/** stand art publish refuses artifacts above this size. */
+const STAND_MAX_BYTES = 20 * 1024 * 1024;
 
 type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string };
 
@@ -119,9 +127,21 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       title: z.string().min(1).optional(),
       theme: z.enum(Object.keys(THEMES) as [string, ...string[]]).optional(),
       footer: z.string().optional(),
+      published_url: z.string().url().optional()
+        .describe('URL returned by stand art_publish (https://art-….stand.yakutov.com). Saved so the next publish updates the same address.'),
     }),
-  }, async ({ id, ...patch }) => {
-    try { return await mutate(id, 'Updated deck settings.', d => ({ ...d, ...patch } as Deck)); } catch (e) { return fail(e); }
+  }, async ({ id, published_url, ...patch }) => {
+    try {
+      return await mutate(id, 'Updated deck settings.', d => {
+        const next = { ...d, ...patch } as Deck;
+        if (published_url) {
+          const name = new URL(published_url).hostname.split('.')[0];
+          if (!/^art-[a-z0-9-]+$/.test(name)) throw new Error(`published_url host must start with an art-… artifact name, got "${name}"`);
+          next.published = { name, url: published_url, at: new Date().toISOString() };
+        }
+        return next;
+      });
+    } catch (e) { return fail(e); }
   });
 
   server.registerTool('slides_set', {
@@ -227,6 +247,39 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       const files = await exportDeck(store.dir(id), deck, format);
       const where = files.map(f => ctx.publicUrl ? `${ctx.publicUrl}/d/${id}/${f}` : `${store.dir(id)}/${f}`);
       return ok(`Exported ${format}:\n${where.join('\n')}`);
+    } catch (e) { return fail(e); }
+  });
+
+  server.registerTool('deck_bundle', {
+    title: 'Bundle deck for publishing',
+    description: 'Write the deck as a self-contained static site (presenter view, assets, embedded fonts, optional PDF download) and return its absolute path. ' +
+      'Publish that path with the stand MCP tool art_publish to get a public https link. Run deck_check first.',
+    inputSchema: z.object({
+      id: Id,
+      include_pdf: z.boolean().default(true).describe('Put deck.pdf next to the page and show a "PDF ↓" link in the presenter view.'),
+    }),
+  }, async ({ id, include_pdf }) => {
+    try {
+      const deck = await store.get(id);
+      const pdfBuf = include_pdf ? await pdf(store.dir(id)) : undefined;
+      const { files, bytes } = await store.bundle(id, nodePath.join(ctx.bundleDir, id), pdfBuf);
+      const hostPath = nodePath.posix.join(ctx.bundleHostDir, id);
+      const mb = (bytes / 1024 / 1024).toFixed(1);
+      if (bytes > STAND_MAX_BYTES) {
+        return fail(new Error(`bundle is ${mb} MB, stand artifacts are limited to 20 MB. Compress or drop large images, or bundle with include_pdf: false.`));
+      }
+      const publishArgs = {
+        path: hostPath,
+        title: deck.title,
+        ...(deck.published ? { name: deck.published.name } : {}),
+      };
+      return ok(`Bundle ready: ${hostPath} (${files} files, ${mb} MB${store.hasLocalFonts ? ', fonts embedded' : ', fonts from Google Fonts'}).\n` +
+        (deck.published
+          ? `Previously published at ${deck.published.url}; passing its name updates that same address.\n`
+          : '') +
+        `Next:\n  1. stand art_publish ${JSON.stringify(publishArgs)} (add issue: "<KEY>" to tie it to the Multica issue)\n` +
+        `  2. deck_update {"id": "${id}", "published_url": "<URL from art_publish>"} so later publishes keep the address\n` +
+        '  3. Post the URL in the issue.');
     } catch (e) { return fail(e); }
   });
 
