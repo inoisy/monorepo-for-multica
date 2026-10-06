@@ -23,10 +23,10 @@ projects, one directory per project:
     README.md
 ```
 
-Categories so far: `mcp/` (MCP servers) and `skills/` (agent skills in the
+Categories so far are `mcp/`, `services/` and `skills/` (agent skills in the
 `SKILL.md` format, importable into a Multica workspace). New kinds of work get
-their own top-level directory (`services/`, `libs/`, …) rather than landing
-next to existing ones.
+their own top-level directory (`libs/`, …) rather than landing next to an
+existing category.
 
 Projects are independent — there is no shared build graph, lockfile, or
 tooling version pinned at the monorepo root. Each project ships its own.
@@ -55,6 +55,13 @@ imported into Multica from its GitHub path.
 - `skills/slide-design/` — how to make decks that look designed with the
   `slides` MCP server: storyline, layout choice, bento recipes, copy rules,
   and the preview-and-fix loop.
+
+### `services/` — services of the agents' server
+
+- `services/stand/` — branch stands and static artifacts on
+  `*.stand.yakutov.com`: the `stand` CLI, its MCP server, the router and the
+  static server. Bash, Python, Node.js, no build step. Deployed by hand by the
+  server owner. See `services/stand/README.md`.
 
 ## Conventions
 
