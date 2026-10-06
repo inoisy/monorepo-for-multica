@@ -1,0 +1,38 @@
+{
+  "name": "slides",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server that builds slide decks from structured JSON over curated themes and layouts (including bento grids), with live preview, render checks, and PDF/PPTX/PNG export.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "slides": "./dist/index.js"
+  },
+  "packageManager": "pnpm@10.5.2",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx watch src/index.ts --http",
+    "test": "vitest run",
+    "demo": "tsx scripts/demo.ts",
+    "fonts": "pnpm build && node scripts/fetch-fonts.mjs fonts"
+  },
+  "files": [
+    "dist",
+    "fonts"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "express": "^5.2.1",
+    "playwright": "1.60.0",
+    "pptxgenjs": "^4.0.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "22.x",
+    "tsx": "4.22.3",
+    "typescript": "~5.8.3",
+    "vitest": "^2.1.9"
+  }
+}

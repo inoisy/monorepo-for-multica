@@ -23,9 +23,10 @@ projects, one directory per project:
     README.md
 ```
 
-Categories so far are `mcp/` and `services/`. New kinds of work get their own
-top-level directory (`libs/`, …) rather than landing next to an existing
-category.
+Categories so far are `mcp/`, `services/` and `skills/` (agent skills in the
+`SKILL.md` format, importable into a Multica workspace). New kinds of work get
+their own top-level directory (`libs/`, …) rather than landing next to an
+existing category.
 
 Projects are independent — there is no shared build graph, lockfile, or
 tooling version pinned at the monorepo root. Each project ships its own.
@@ -41,6 +42,19 @@ tooling version pinned at the monorepo root. Each project ships its own.
 - `mcp/sphere-tasks/` — MCP server + CLI for Bitrix24 Sphere
   (`sphere.loodsen.ru`) task management, sprint sync, and webhooks.
   Node.js, TypeScript, npm. See `mcp/sphere-tasks/README.md`.
+- `mcp/slides/` — self-hosted Claude Slides analog: agents build decks as JSON
+  over curated themes and layouts (incl. bento grids), with browser render
+  checks, screenshot previews, and PDF/PPTX/PNG export. Node.js, TypeScript,
+  pnpm. See `mcp/slides/README.md`.
+
+### `skills/` — agent skills
+
+Each skill is a directory with a `SKILL.md` (plus optional `references/`),
+imported into Multica from its GitHub path.
+
+- `skills/slide-design/` — how to make decks that look designed with the
+  `slides` MCP server: storyline, layout choice, bento recipes, copy rules,
+  and the preview-and-fix loop.
 
 ### `services/` — services of the agents' server
 
