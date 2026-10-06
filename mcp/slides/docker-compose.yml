@@ -1,0 +1,16 @@
+services:
+  slides:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3076:3000"
+    environment:
+      PORT: 3000
+      # The address people and agents open previews at. Change to the host's
+      # LAN name or domain so links in Multica issue comments work.
+      SLIDES_PUBLIC_URL: ${SLIDES_PUBLIC_URL:-http://localhost:3076}
+    volumes:
+      - ./data:/data
+    shm_size: 1gb
+    restart: unless-stopped
