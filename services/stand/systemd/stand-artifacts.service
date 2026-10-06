@@ -1,0 +1,18 @@
+[Unit]
+Description=Stand artifacts (art-*.stand.yakutov.com)
+After=network.target
+
+[Service]
+User=stand
+Group=stand
+ExecStart=/usr/bin/node /opt/stand/static-server.mjs --hosts /var/lib/stand/artifacts 8094 stand.yakutov.com
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

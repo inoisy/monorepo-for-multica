@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@19.1.0",
+    "react/": "https://esm.sh/react@19.1.0/",
+    "react-dom": "https://esm.sh/react-dom@19.1.0?external=react",
+    "react-dom/client": "https://esm.sh/react-dom@19.1.0/client?external=react",
+    "recharts": "https://esm.sh/recharts@2.15.3?external=react,react-dom",
+    "lucide-react": "https://esm.sh/lucide-react@0.511.0?external=react",
+    "framer-motion": "https://esm.sh/framer-motion@12?external=react,react-dom",
+    "d3": "https://esm.sh/d3@7",
+    "lodash": "https://esm.sh/lodash-es@4",
+    "papaparse": "https://esm.sh/papaparse@5",
+    "mathjs": "https://esm.sh/mathjs@14",
+    "chart.js": "https://esm.sh/chart.js@4/auto",
+    "three": "https://esm.sh/three@0.176.0",
+    "date-fns": "https://esm.sh/date-fns@4",
+    "clsx": "https://esm.sh/clsx@2"
+  }
+}
+</script>
+<script src="https://unpkg.com/@babel/standalone@7.27.2/babel.min.js"></script>
+<style>
+  #artifact-error { display: none; margin: 24px; padding: 16px; border-radius: 8px; background: #fef2f2; color: #991b1b;
+    font: 14px/1.5 ui-monospace, monospace; white-space: pre-wrap; border: 1px solid #fecaca; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<pre id="artifact-error"></pre>
+<script type="module">
+// Артефакт: app.jsx / app.tsx с `export default` компонентом. Собирается прямо в браузере.
+const showError = (title, err) => {
+  const el = document.getElementById("artifact-error");
+  el.style.display = "block";
+  el.textContent = `${title}\n\n${err && err.stack ? err.stack : err}`;
+};
+window.addEventListener("error", (e) => showError("Ошибка выполнения", e.error || e.message));
+window.addEventListener("unhandledrejection", (e) => showError("Ошибка выполнения", e.reason));
+try {
+  const file = "__SOURCE__";
+  const res = await fetch(`./${file}`, { cache: "no-cache" });
+  if (!res.ok) throw new Error(`не удалось загрузить ${file}: HTTP ${res.status}`);
+  const src = await res.text();
+  let code;
+  try {
+    code = Babel.transform(src, {
+      filename: file,
+      sourceType: "module",
+      presets: [["react", { runtime: "automatic" }], ["typescript", { isTSX: true, allExtensions: true }]],
+    }).code;
+  } catch (err) {
+    throw Object.assign(new Error(`Синтаксическая ошибка в ${file}:\n${err.message}`), { stack: undefined });
+  }
+  const mod = await import(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+  const App = mod.default;
+  if (typeof App !== "function") throw new Error(`${file} должен экспортировать компонент: export default function App() { … }`);
+  const [{ createElement }, { createRoot }] = await Promise.all([import("react"), import("react-dom/client")]);
+  createRoot(document.getElementById("root")).render(createElement(App));
+} catch (err) {
+  showError("Артефакт не запустился", err);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+[Unit]
+Description=Проверка веток стендов с --follow раз в 2 минуты
+
+[Timer]
+OnCalendar=*:0/2
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

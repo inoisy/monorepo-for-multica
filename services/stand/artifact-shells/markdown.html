@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__TITLE__</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.8.1/github-markdown.min.css">
+<style>
+  body { margin: 0; background: #fff; }
+  @media (prefers-color-scheme: dark) { body { background: #0d1117; } }
+  .markdown-body { box-sizing: border-box; max-width: 900px; margin: 0 auto; padding: 32px 20px 64px; }
+</style>
+</head>
+<body>
+<article id="doc" class="markdown-body">Загрузка…</article>
+<script type="module">
+import { marked } from "https://cdn.jsdelivr.net/npm/marked@15.0.12/lib/marked.esm.js";
+import DOMPurify from "https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.es.mjs";
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.6.0/dist/mermaid.esm.min.mjs";
+
+const doc = document.getElementById("doc");
+const src = await (await fetch("./__SOURCE__", { cache: "no-cache" })).text();
+doc.innerHTML = DOMPurify.sanitize(marked.parse(src, { gfm: true }));
+const h1 = doc.querySelector("h1");
+if (h1 && document.title === "__TITLE__") document.title = h1.textContent;
+// ```mermaid — диаграммы
+const blocks = doc.querySelectorAll("pre > code.language-mermaid");
+blocks.forEach((code) => {
+  const div = document.createElement("div");
+  div.className = "mermaid";
+  div.textContent = code.textContent;
+  code.parentElement.replaceWith(div);
+});
+if (blocks.length) {
+  mermaid.initialize({ startOnLoad: false, theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default" });
+  await mermaid.run({ querySelector: ".mermaid" });
+}
+</script>
+</body>
+</html>
