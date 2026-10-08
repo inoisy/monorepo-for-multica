@@ -1,0 +1,23 @@
+{
+  "name": "loodsen-agents-demo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Remotion demo video: AI agents for Loodsen administrative staff",
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render Main out/loodsen-agents.mp4",
+    "render:all": "node scripts/render-personal.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.534",
+    "@remotion/paths": "4.0.534",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.534"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "typescript": "5.6.3"
+  }
+}

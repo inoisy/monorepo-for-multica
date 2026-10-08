@@ -23,8 +23,9 @@ projects, one directory per project:
     README.md
 ```
 
-Categories so far are `mcp/`, `services/` and `skills/` (agent skills in the
-`SKILL.md` format, importable into a Multica workspace). New kinds of work get
+Categories so far are `mcp/`, `services/`, `skills/` (agent skills in the
+`SKILL.md` format, importable into a Multica workspace) and `video/`
+(Remotion video projects). New kinds of work get
 their own top-level directory (`libs/`, …) rather than landing next to an
 existing category.
 
@@ -62,6 +63,13 @@ imported into Multica from its GitHub path.
   `*.stand.yakutov.com`: the `stand` CLI, its MCP server, the router and the
   static server. Bash, Python, Node.js, no build step. Deployed by hand by the
   server owner. See `services/stand/README.md`.
+
+### `video/` — video projects
+
+- `video/loodsen-agents-demo/` — 90-second Remotion film presenting AI agents
+  to administrative staff: continuous camera over a nautical chart, zooms into
+  live UI cards, personal versions rendered from data. Node.js, TypeScript,
+  pnpm. See `video/loodsen-agents-demo/README.md`.
 
 ## Conventions
 
