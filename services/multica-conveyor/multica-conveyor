@@ -26,19 +26,20 @@
 загрузка подписок, журнал действий). Комментарии в задачи пишет только при провале приёмки.
 `--dry-run` печатает решения, ничего не меняет и страницу не пишет.
 """
-import datetime as dt, html, json, os, re, shutil, subprocess, sys, tempfile, traceback, urllib.error, urllib.request
+import contextlib, datetime as dt, fcntl, html, json, os, re, shutil, subprocess, sys, tempfile, traceback, urllib.error, urllib.request
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import control_state as control
 
 CONFIG = Path(os.environ.get('MULTICA_CONVEYOR_CONFIG', '/etc/multica-conveyor.json'))
-STATE = Path.home() / '.local/state/multica-conveyor/state.json'
+STATE = Path(os.environ.get('MULTICA_CONVEYOR_STATE', Path.home() / '.local/state/multica-conveyor/state.json'))
 CANCELLED = {'cancelled', 'canceled'}
 HOLD = '**Ждёт:**'
+START_HOLD = re.compile(r'^\s*(?:\*\*)?Жд[её]т(?:\*\*)?\s*:(?:\*\*)?', re.I | re.M)
 BRANCH = re.compile(r'\bt-\d+-[a-z0-9][a-z0-9-]*[a-z0-9]\b')
 DIFF_GUARD = re.compile(r'^\+.*(?:: any\b|as unknown as|@ts-(?:ignore|expect-error)|eslint-disable)', re.M)
 QUOTA = re.compile(r'usage limit|spend limit|rate.?limit|hit your .{0,20}limit|quota|too many requests|\b429\b', re.I)
-ACTIVE_RUN = {'queued', 'running', 'dispatched', 'pending'}
+ACTIVE_RUN = control.ACTIVE
 EVENTS_KEEP = 400
 
 
@@ -109,15 +110,34 @@ def status(issue): return issue.get('status') or issue.get('status_category')
 def is_done(issue): return status(issue) == 'done' or issue.get('status_category') == 'done'
 def is_cancelled(issue): return status(issue) in CANCELLED or issue.get('status_category') in CANCELLED
 def closed(issue): return is_cancelled(issue) or (is_done(issue) and not issue.get('unmerged'))
+def is_held(issue): return bool(START_HOLD.search(issue.get('description') or ''))
 
 
-def mark_unmerged(stages, branches_of, merged):
+def work_in_flight(m, issues):
+    """Не используем capped --siblings: очередь и ожидающий runtime тоже владеют работой."""
+    for issue in issues:
+        key = issue['identifier']
+        runs = items(m('issue', 'runs', key, '--active'), 'runs')
+        if any(r.get('status') in ACTIVE_RUN for r in runs):
+            return True
+        if not closed(issue):
+            wakeups = items(m('issue', 'wakeup', 'list', key), 'wakeups')
+            if any(rule.get('enabled') for rule in wakeups):
+                return True
+    return False
+
+
+def mark_unmerged(stages, branches_of, merged, exists=lambda branch: True):
     """Пометить задачи на сдаче (`in_review`) и в «Готово», чьи ветки ещё не в base.
-    branches_of(issue) -> ветки задачи; merged(branch) -> влита ли."""
+    branches_of(issue) -> ветки задачи; merged(branch) -> влита ли; exists(branch) -> есть ли ветка.
+    Удалённая ветка закрытой задачи — уже влитая и убранная человеком: этап из-за неё не держим.
+    У задачи на сдаче пропавшая ветка остаётся невлитой — приёмка остановится, а не закроет задачу без кода."""
     for st in stages:
         for i in st['issues']:
             if is_done(i) or status(i) == 'in_review':
-                pending = [b for b in branches_of(i) if not merged(b)]
+                i['delivery_branches'] = branches_of(i)
+                pending = [b for b in i['delivery_branches']
+                           if not merged(b) and (exists(b) or not is_done(i))]
                 if pending:
                     i['unmerged'] = pending
 
@@ -130,10 +150,10 @@ def decide(stages):
         open_ = [i for i in st['issues'] if not closed(i)]
         if not open_:
             continue
-        to_accept = [i for i in open_ if i.get('unmerged')]
-        held = [i for i in open_ if HOLD in (i.get('description') or '')]
-        to_assign = [i for i in open_ if not i.get('assignee_id') and i not in held]
-        return st['stage'], to_accept, to_assign, held
+        waiting = [i for i in open_ if is_held(i)]
+        to_accept = [i for i in open_ if status(i) == 'in_review' and i.get('delivery_branches') and i not in waiting]
+        to_assign = [i for i in open_ if status(i) in ('backlog', 'todo') and not i.get('assignee_id') and i not in waiting]
+        return st['stage'], to_accept, to_assign, waiting
     return None, [], [], []
 
 
@@ -200,7 +220,7 @@ class Repo:
     def head(self, ref): return self.git('rev-parse', '--verify', '-q', ref).stdout.strip()
 
     def merged(self, branch):
-        return not self.head(branch) or self.git('merge-base', '--is-ancestor', branch, self.base).returncode == 0
+        return bool(self.head(branch)) and self.git('merge-base', '--is-ancestor', branch, self.base).returncode == 0
 
     def accept(self, branch, commands, timeout):
         """Свежий клон ветки + свежий base + проверка диффа + команды приёмки. Возвращает (ok, причина, хвост лога)."""
@@ -242,8 +262,10 @@ class Watch:
         self.target_key = None
         try:
             self.state = json.loads(STATE.read_text())
-        except (OSError, ValueError):
+        except FileNotFoundError:
             self.state = {}
+        if not isinstance(self.state, dict):
+            raise ValueError('Состояние конвейера должно быть объектом; автоматические действия запрещены')
 
     def permit(self):
         with control.Store().locked() as settings:
@@ -259,10 +281,24 @@ class Watch:
         if self.dry:
             return
         STATE.parent.mkdir(parents=True, exist_ok=True)
-        STATE.write_text(json.dumps(self.state, ensure_ascii=False, indent=1))
+        fd, path = tempfile.mkstemp(dir=STATE.parent, prefix='.state-')
+        try:
+            with os.fdopen(fd, 'w') as output:
+                json.dump(self.state, output, ensure_ascii=False, indent=1)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(path, STATE)
+            directory = os.open(STATE.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
 
     def log(self, kind, text):
-        print(text)
+        print(text, flush=True)
         if self.dry:
             return
         ev = self.state.setdefault('_events', [])
@@ -292,8 +328,10 @@ def report_failure(m, epic, repo, key, branch, why, tail):
 def accept_issue(m, repo, epic, issue, w):
     """Приёмка и слияние всех невлитых веток задачи. True — задача влита целиком."""
     key = issue['identifier']
-    for branch in issue['unmerged']:
+    for branch in issue.get('unmerged', []):
         pair = f"{repo.head(branch)}+{repo.head(repo.base)}"
+        if not repo.head(branch) or not repo.head(repo.base):
+            raise RuntimeError(f'{key}: ветка или база отсутствует; приёмка запрещена')
         if already_failed(w.state, key, branch, pair):
             print(f"{epic['key']}: {key} {branch} уже не прошла приёмку на этих коммитах, ждём правки")
             return False
@@ -301,39 +339,90 @@ def accept_issue(m, repo, epic, issue, w):
         if w.dry:
             return False
         w.permit()
+        w.state['_acceptance'] = {'issue': key, 'branch': branch, 'pair': pair,
+                                 'started_at': now_utc().isoformat(), 'status': 'checking'}
+        w.log('check', f"{epic['key']}: {key} проверяется в свежем клоне; следующий пакет ждёт окончания проверки")
+        w.save()
         ok, why, tail = repo.accept(branch, epic.get('acceptance', []), epic.get('acceptance_timeout', 1500))
+        w.state['_acceptance']['status'] = 'passed' if ok else 'failed'
         if not ok:
             w.state.setdefault(key, {})[branch] = pair
             w.log('fail', f"{epic['key']}: {key} {branch} не прошла приёмку: {why}")
             w.save()
             report_failure(m, epic, repo, key, branch, why, tail)
             return False
+        current = m('issue', 'get', key)
+        current = current.get('issue', current)
+        if (f"{repo.head(branch)}+{repo.head(repo.base)}" != pair or
+                status(current) != 'in_review' or is_held(current) or work_in_flight(m, [current])):
+            w.log('skip', f'{key}: входы или исполнитель изменились во время проверки; слияние отложено')
+            return False
         w.permit()
         repo.merge(branch, epic.get('commit_ref', key))
         w.log('merge', f"{epic['key']}: {key} {branch} принята и влита в {repo.base}")
     if not is_done(issue):
+        if w.dry:
+            return False
+        current = m('issue', 'get', key)
+        current = current.get('issue', current)
+        if status(current) != 'in_review' or is_held(current) or work_in_flight(m, [current]):
+            return False
         m('issue', 'update', key, '--status', 'done', write=True)
     issue['unmerged'] = []
     issue['status'] = 'done'
     return True
 
 
+def dispatch_issue(m, epic, issue, family, w):
+    """Одна атомарная запись назначения и статуса; неизвестный исход не повторяем автоматически."""
+    key = issue['identifier']
+    current = m('issue', 'get', key)
+    current = current.get('issue', current)
+    if current.get('assignee_id') or status(current) not in ('backlog', 'todo') or is_held(current):
+        return
+    if work_in_flight(m, family):
+        w.log('skip', f'{key}: есть активный исполнитель или будильник; новый запуск запрещён')
+        return
+    dispatches = w.state.setdefault('_dispatch', {})
+    if key in dispatches:
+        w.log('skip', f'{key}: назначение уже отправлялось; сверить неизвестный исход вручную')
+        return
+    w.log('assign', f"{epic['key']}: {key} → сквад")
+    if w.dry:
+        return
+    w.permit()
+    dispatches[key] = {'squad_id': epic['squad_id'], 'status': 'pending', 'at': now_utc().isoformat()}
+    w.save()
+    m('issue', 'update', key, '--assignee-id', epic['squad_id'], '--status', 'todo', write=True)
+    dispatches[key]['status'] = 'confirmed'
+    w.save()
+
+
 def run_epic(epic, w, snapshot, frozen=False):
     """frozen — цель на паузе: только читаем для снимка, ничего не назначаем, не повторяем и не сливаем."""
     m = Multica(epic['workspace'], w.dry, w.permit)
+    # Без явной передачи владения сторож остаётся наблюдателем. Main вливает человек.
+    frozen = frozen or (epic.get('repo') and (epic.get('coordinator') != 'external' or
+                                            epic.get('base', 'main') in ('main', 'master')))
     if epic.get('kind') == 'issue':
         root = m('issue', 'get', epic['key'])
         stages = [{'stage': 1, 'issues': [root.get('issue', root)]}]
     else:
-        stages = m('issue', 'children', epic['key']).get('stages', [])
+        children = m('issue', 'children', epic['key'])
+        stages = children.get('stages', [])
+        if children.get('unstaged'):
+            frozen = True
+            w.log('skip', f"{epic['key']}: есть задачи без стадии; требуется явный порядок запуска")
+    family = [issue for st in stages for issue in st['issues']]
     repo = Repo(epic['repo'], epic.get('base', 'main')) if epic.get('repo') else None
     if repo:
         def branches_of(issue):
             comments = items(m('issue', 'comment', 'list', issue['identifier']), 'comments')
             return sorted({b for c in comments if c.get('author_type') == 'agent' for b in BRANCH.findall(c.get('content') or '')})
-        mark_unmerged(stages, branches_of, repo.merged)
-        for issue in [] if frozen else decide(stages)[1]:
-            accept_issue(m, repo, epic, issue, w)
+        mark_unmerged(stages, branches_of, repo.merged, lambda b: bool(repo.head(b)))
+        if not frozen and not work_in_flight(m, family):
+            for issue in decide(stages)[1]:
+                accept_issue(m, repo, epic, issue, w)
     stage, _, to_assign, held = decide(stages)
     to_assign = to_assign[:epic.get('max_per_tick', 4)]
     overrides = [] if frozen else epic.get('overrides', [])
@@ -350,7 +439,7 @@ def run_epic(epic, w, snapshot, frozen=False):
                               'stages': [{'stage': st['stage'], 'issues': [
                                   snap_issues.setdefault(i['identifier'], {
                                       'key': i['identifier'], 'title': i.get('title', ''), 'status': status(i),
-                                      'assigned': bool(i.get('assignee_id')), 'held': HOLD in (i.get('description') or ''),
+                                      'assigned': bool(i.get('assignee_id')), 'held': is_held(i),
                                       'unmerged': i.get('unmerged') or [], 'jobs': []}) for i in st['issues']]}
                                   for st in sorted(stages, key=lambda s: s['stage'])]})
     if stage is None:
@@ -375,10 +464,7 @@ def run_epic(epic, w, snapshot, frozen=False):
             if not w.dry:
                 retries[key] = now.isoformat()
     for issue in [] if frozen else to_assign:
-        w.log('assign', f"{epic['key']}: стадия {stage}, {issue['identifier']} → сквад")
-        if status(issue) in ('backlog', None):
-            m('issue', 'update', issue['identifier'], '--status', 'todo', write=True)
-        m('issue', 'assign', issue['identifier'], '--to-id', epic['squad_id'], write=True)
+        dispatch_issue(m, epic, issue, family, w)
 
 
 def apply_profile(m, agent_id, p):
@@ -762,7 +848,31 @@ def write_status(cfg, snapshot, events):
         tmp.replace(Path(d, name))
 
 
+@contextlib.contextmanager
+def run_lock(state):
+    """Один процесс владеет снимком и журналом намерений до конца тика."""
+    state.parent.mkdir(parents=True, exist_ok=True)
+    with state.with_suffix('.run.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def run(cfg, dry):
+    with run_lock(STATE) as acquired:
+        if not acquired:
+            print('Тик пропущен: другой экземпляр сторожа ещё работает', flush=True)
+            return
+        _run(cfg, dry)
+
+
+def _run(cfg, dry):
     w = Watch(dry)
     with control.Store().locked() as settings:
         selected = [t for t in control.targets(cfg, settings) if t.get('enabled', True)]
@@ -798,4 +908,5 @@ def run(cfg, dry):
 
 
 if __name__ == '__main__':
+    sys.stdout.reconfigure(line_buffering=True)
     run(json.loads(CONFIG.read_text()), '--dry-run' in sys.argv)

@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 
-ACTIVE = {'queued', 'running', 'dispatched', 'pending', 'preparing'}
+ACTIVE = {'queued', 'running', 'dispatched', 'pending', 'preparing', 'waiting_local_directory'}
 DEFAULT_STATE = Path.home() / '.local/state/multica-control/controls.json'
 
 
