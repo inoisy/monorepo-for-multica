@@ -1,0 +1,801 @@
+#!/usr/bin/python3 -I
+"""Единый сторож multica: конвейер эпиков, смена провайдера на лимите, страница статуса. Без человека.
+
+Конфиг — /etc/multica-conveyor.json, таймер раз в 2 минуты от пользователя agents.
+
+Конвейер — для каждого эпика из `epics`:
+1. Приёмка. Задача активной стадии в `in_review` (или в «Готово», но не влитая) с веткой `t-<номер>-<слаг>`
+   в комментариях агентов: свежий клон ветки, поверх — свежий `base`, проверка диффа и команды `acceptance`.
+   Зелёно — ветка вливается в `base` (`--no-ff`, хвост сообщения `commit_ref`), задача уходит в «Готово».
+   Красно или конфликт — комментарий лидеру сквада с хвостом лога, задача в `in_progress`; та же пара коммитов
+   ветки и base повторно не гоняется.
+2. Стадия закрыта, когда все её задачи в «Готово» и влиты (или отменены); удалённая ветка считается влитой.
+3. Задачи первой незакрытой стадии без исполнителя назначаются скваду (назначение стартует ран). Задача с
+   «**Ждёт:**» в описании ждёт ответа заказчика: конвейер её пропускает и дальше этой стадии не идёт.
+4. Автоповтор: последний ран задачи активной стадии упал на лимите, активных ранов нет, с падения и с прошлого
+   повтора прошло `quota_retry_minutes` (20) — `issue rerun`.
+`overrides` меняют уровень рассуждения агента на время задачи и возвращают после «Готово»; ручную правку не
+перетирают.
+
+Смена провайдера — `providers.agents`: у агента цепочка профилей (runtime, модель, уровень, custom_args),
+первый — основной. Цепочка, сохранённая на экране агента в Multica (`chains` в controls.json), перекрывает конфиг. Последний ран агента упал на лимите на текущем профиле — агент переходит на следующий профиль,
+его задачи, упавшие на лимите, перезапускаются сразу. Через `restore_hours` агент возвращается на основной
+(не сброшен лимит — переедет снова).
+
+Страница статуса — `status_dir`: index.html и status.json каждый тик (эпики, агенты и их провайдеры,
+загрузка подписок, журнал действий). Комментарии в задачи пишет только при провале приёмки.
+`--dry-run` печатает решения, ничего не меняет и страницу не пишет.
+"""
+import datetime as dt, html, json, os, re, shutil, subprocess, sys, tempfile, traceback, urllib.error, urllib.request
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import control_state as control
+
+CONFIG = Path(os.environ.get('MULTICA_CONVEYOR_CONFIG', '/etc/multica-conveyor.json'))
+STATE = Path.home() / '.local/state/multica-conveyor/state.json'
+CANCELLED = {'cancelled', 'canceled'}
+HOLD = '**Ждёт:**'
+BRANCH = re.compile(r'\bt-\d+-[a-z0-9][a-z0-9-]*[a-z0-9]\b')
+DIFF_GUARD = re.compile(r'^\+.*(?:: any\b|as unknown as|@ts-(?:ignore|expect-error)|eslint-disable)', re.M)
+QUOTA = re.compile(r'usage limit|spend limit|rate.?limit|hit your .{0,20}limit|quota|too many requests|\b429\b', re.I)
+ACTIVE_RUN = {'queued', 'running', 'dispatched', 'pending'}
+EVENTS_KEEP = 400
+
+
+class AutomationPaused(Exception):
+    """Оператор приостановил автоматические действия; это штатное состояние."""
+
+
+def ts(s): return dt.datetime.fromisoformat(s.replace('Z', '+00:00')) if s else None
+def now_utc(): return dt.datetime.now(dt.timezone.utc)
+
+
+def is_quota_failure(run):
+    return run.get('status') == 'failed' and (
+        'quota' in (run.get('failure_reason') or '') or bool(QUOTA.search(run.get('error') or '')))
+
+
+def latest(runs): return max(runs, key=lambda r: r.get('created_at') or '') if runs else None
+
+
+def quota_retry_due(runs, now, last_retry, minutes):
+    """Повторить ли задачу после лимита провайдера: нет активных ранов, последний ран упал на квоте,
+    с падения и с прошлого повтора прошло `minutes` минут."""
+    if not runs or any(r.get('status') in ACTIVE_RUN for r in runs):
+        return False
+    last = latest(runs)
+    if not is_quota_failure(last):
+        return False
+    wait = dt.timedelta(minutes=minutes)
+    ended = ts(last.get('completed_at') or last.get('created_at'))
+    return now - ended >= wait and (not last_retry or now - ts(last_retry) >= wait)
+
+
+def provider_decision(runs, entry, chain_len, now, restore_hours, mode='auto', availability=None, restore_minutes=30):
+    """Ручной выбор и активные запуски не переключаем; свежие квоты исключают исчерпанные профили.
+    Профиль выше по цепочке, подтверждённый свежей квотой, возвращается через `restore_minutes`,
+    без подтверждения — только основной и только через `restore_hours`."""
+    if mode == 'manual' or any(r.get('status') in control.ACTIVE for r in runs):
+        return None
+    idx, since = entry.get('idx', 0), ts(entry.get('since'))
+    statuses = availability if availability is not None else [None] * chain_len
+    last = latest(runs)
+    failed = last and is_quota_failure(last) and (not since or ts(last.get('created_at')) >= since)
+    if failed or statuses[idx] is False:
+        target = control.next_profile(statuses, idx + 1)
+        if target is None and availability is not None:
+            target = next((i for i in range(idx) if statuses[i] is True), None)
+        return ('switch', target) if target is not None else ('exhausted', idx)
+    better = next((i for i in range(idx) if statuses[i] is True), None)
+    if better is not None and since and now - since >= dt.timedelta(minutes=restore_minutes):
+        return ('restore', better)
+    if idx > 0 and since and now - since >= dt.timedelta(hours=restore_hours) and statuses[0] is not False:
+        return ('restore', 0)
+    return None
+
+
+def jobs_of(runs, names, keep=14):
+    """Раны задачи как джобы пайплайна: по времени, последние `keep`."""
+    def secs(r):
+        a, b = ts(r.get('started_at')), ts(r.get('completed_at'))
+        return int((b - a).total_seconds()) if a and b else None
+    out = [{'agent': names.get(r.get('agent_id'), (r.get('agent_id') or '?')[:8]), 'status': r.get('status'),
+            'at': r.get('started_at') or r.get('created_at'), 'secs': secs(r),
+            'quota': is_quota_failure(r)} for r in sorted(runs, key=lambda r: r.get('created_at') or '')]
+    return out[-keep:]
+
+
+def status(issue): return issue.get('status') or issue.get('status_category')
+def is_done(issue): return status(issue) == 'done' or issue.get('status_category') == 'done'
+def is_cancelled(issue): return status(issue) in CANCELLED or issue.get('status_category') in CANCELLED
+def closed(issue): return is_cancelled(issue) or (is_done(issue) and not issue.get('unmerged'))
+
+
+def mark_unmerged(stages, branches_of, merged):
+    """Пометить задачи на сдаче (`in_review`) и в «Готово», чьи ветки ещё не в base.
+    branches_of(issue) -> ветки задачи; merged(branch) -> влита ли."""
+    for st in stages:
+        for i in st['issues']:
+            if is_done(i) or status(i) == 'in_review':
+                pending = [b for b in branches_of(i) if not merged(b)]
+                if pending:
+                    i['unmerged'] = pending
+
+
+def decide(stages):
+    """По стадиям эпика — что делать сейчас. Возвращает (stage, to_accept, to_assign, held):
+    stage — номер активной стадии или None, если эпик закрыт; to_accept — задачи на приёмку и слияние;
+    to_assign — задачи для назначения; held — задачи, ждущие заказчика."""
+    for st in sorted(stages, key=lambda s: s['stage']):
+        open_ = [i for i in st['issues'] if not closed(i)]
+        if not open_:
+            continue
+        to_accept = [i for i in open_ if i.get('unmerged')]
+        held = [i for i in open_ if HOLD in (i.get('description') or '')]
+        to_assign = [i for i in open_ if not i.get('assignee_id') and i not in held]
+        return st['stage'], to_accept, to_assign, held
+    return None, [], [], []
+
+
+def override_levels(stages, overrides, assigning, levels):
+    """Какие уровни рассуждения выставить сейчас: [(agent_id, level)].
+    assigning — ключи задач, назначаемых в этом тике; levels — текущие уровни агентов {agent_id: level}."""
+    issues = {i['identifier']: i for st in stages for i in st['issues']}
+    out = []
+    for o in overrides:
+        issue = issues.get(o['issue'])
+        if not issue:
+            continue
+        current = levels.get(o['agent_id'])
+        if closed(issue):
+            if current == o['thinking_level']:
+                out.append((o['agent_id'], o['restore']))
+        elif (issue.get('assignee_id') or o['issue'] in assigning) and current != o['thinking_level']:
+            out.append((o['agent_id'], o['thinking_level']))
+    return out
+
+
+def already_failed(state, key, branch, pair):
+    """Та же пара коммитов ветки и base уже не прошла приёмку — повторно не гонять."""
+    return state.get(key, {}).get(branch) == pair
+
+
+def parse_json(out):
+    """JSON из вывода multica; CLI иногда дописывает после него строку-подсказку."""
+    out = out.strip()
+    if not out.startswith(('{', '[')):
+        return {}
+    return json.JSONDecoder().raw_decode(out)[0]
+
+
+def items(d, key):
+    return d if isinstance(d, list) else d.get(key, [])
+
+
+class Multica:
+    def __init__(self, ws, dry, guard=None): self.ws, self.dry, self.guard = ws, dry, guard
+
+    def __call__(self, *a, write=False):
+        if write and self.dry:
+            print('  [dry-run] multica', *a)
+            return {}
+        if write and self.guard:
+            self.guard()
+        r = subprocess.run(['multica', *a, '--output', 'json'], capture_output=True, text=True, timeout=120,
+                           env={**os.environ, 'MULTICA_WORKSPACE_ID': self.ws})
+        if r.returncode:
+            raise RuntimeError(f'multica {" ".join(a[:3])}: {r.stderr.strip()[:300]}')
+        return parse_json(r.stdout)
+
+
+class Repo:
+    def __init__(self, path, base): self.path, self.base = path, base
+
+    def git(self, *a, cwd=None, check=False):
+        r = subprocess.run(['git', '-C', cwd or self.path, *a], capture_output=True, text=True)
+        if check and r.returncode:
+            raise RuntimeError(f'git {" ".join(a[:2])}: {r.stderr.strip()[:300]}')
+        return r
+
+    def head(self, ref): return self.git('rev-parse', '--verify', '-q', ref).stdout.strip()
+
+    def merged(self, branch):
+        return not self.head(branch) or self.git('merge-base', '--is-ancestor', branch, self.base).returncode == 0
+
+    def accept(self, branch, commands, timeout):
+        """Свежий клон ветки + свежий base + проверка диффа + команды приёмки. Возвращает (ok, причина, хвост лога)."""
+        tmp = tempfile.mkdtemp(prefix='conveyor-')
+        try:
+            work = os.path.join(tmp, 'w')
+            self.git('clone', '-q', '--branch', branch, self.path, work, cwd=tmp, check=True)
+            if self.git('merge', '--no-edit', f'origin/{self.base}', cwd=work).returncode:
+                return False, f'конфликт с {self.base}', self.git('diff', '--name-only', '--diff-filter=U', cwd=work).stdout
+            diff = self.git('diff', f'origin/{self.base}', '--unified=0', '--', '.', ':(exclude)pnpm-lock.yaml', cwd=work).stdout
+            bad = [m.group(0) for m in DIFF_GUARD.finditer(diff)]
+            if bad:
+                return False, 'в диффе any / as unknown as / @ts-ignore / eslint-disable', '\n'.join(bad[:10])
+            log = ''
+            for cmd in commands:
+                r = subprocess.run(cmd, shell=True, cwd=work, capture_output=True, text=True, timeout=timeout)
+                log += f'$ {cmd}\n{r.stdout}{r.stderr}'
+                if r.returncode:
+                    return False, f'`{cmd}` завершилась с кодом {r.returncode}', log[-3000:]
+            return True, 'зелёно', log[-1500:]
+        except subprocess.TimeoutExpired as e:
+            return False, f'таймаут {timeout} с на `{e.cmd}`', ''
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def merge(self, branch, ref):
+        if self.git('symbolic-ref', '--short', 'HEAD').stdout.strip() != self.base:
+            raise RuntimeError(f'{self.path} не на {self.base}')
+        if self.git('status', '--porcelain', '--untracked-files=no').stdout.strip():
+            raise RuntimeError(f'{self.path}: незакоммиченные изменения')
+        self.git('merge', '--no-ff', branch, '-m', f"Merge branch '{branch}'. {ref}", check=True)
+
+
+class Watch:
+    """Состояние между тиками и журнал действий для страницы статуса."""
+
+    def __init__(self, dry):
+        self.dry = dry
+        self.target_key = None
+        try:
+            self.state = json.loads(STATE.read_text())
+        except (OSError, ValueError):
+            self.state = {}
+
+    def permit(self):
+        with control.Store().locked() as settings:
+            if settings.get('paused'):
+                raise AutomationPaused('Конвейер на паузе')
+            target = settings.get('targets', {}).get(self.target_key, {}) if self.target_key else {}
+            if not target.get('enabled', True) or target.get('removed'):
+                raise AutomationPaused(self.target_key + ' исключена из конвейера')
+            if target.get('paused'):
+                raise AutomationPaused(self.target_key + ' на паузе')
+
+    def save(self):
+        if self.dry:
+            return
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        STATE.write_text(json.dumps(self.state, ensure_ascii=False, indent=1))
+
+    def log(self, kind, text):
+        print(text)
+        if self.dry:
+            return
+        ev = self.state.setdefault('_events', [])
+        # ws — workspace события: журнал на странице «Конвейер» показывает только свой.
+        ev.append({'t': now_utc().isoformat(timespec='seconds'), 'kind': kind, 'text': text, 'ws': getattr(self, 'ws', None)})
+        del ev[:-EVENTS_KEEP]
+
+
+def report_failure(m, epic, repo, key, branch, why, tail):
+    lead = epic.get('lead_id')
+    mention = f"[@Тимлид](mention://agent/{lead}), " if lead else ''
+    cmds = ', '.join(f'`{c}`' for c in epic.get('acceptance', []))
+    body = (f"{mention}автоприёмка конвейера не прошла: ветка `{branch}`, {why}. Приёмка — свежий клон ветки поверх "
+            f"свежего `{repo.base}`, проверка диффа, затем {cmds}. Почини и верни задачу в `in_review` — конвейер "
+            f"примет и вольёт сам.\n\n```\n{tail.strip()[-2500:]}\n```")
+    fd, path = tempfile.mkstemp(suffix='.md')
+    os.write(fd, body.encode())
+    os.close(fd)
+    os.chmod(path, 0o644)
+    try:
+        m('issue', 'comment', 'add', key, '--content-file', path, '--allow-external-file', write=True)
+    finally:
+        os.unlink(path)
+    m('issue', 'update', key, '--status', 'in_progress', write=True)
+
+
+def accept_issue(m, repo, epic, issue, w):
+    """Приёмка и слияние всех невлитых веток задачи. True — задача влита целиком."""
+    key = issue['identifier']
+    for branch in issue['unmerged']:
+        pair = f"{repo.head(branch)}+{repo.head(repo.base)}"
+        if already_failed(w.state, key, branch, pair):
+            print(f"{epic['key']}: {key} {branch} уже не прошла приёмку на этих коммитах, ждём правки")
+            return False
+        print(f"{epic['key']}: {key} приёмка {branch}")
+        if w.dry:
+            return False
+        w.permit()
+        ok, why, tail = repo.accept(branch, epic.get('acceptance', []), epic.get('acceptance_timeout', 1500))
+        if not ok:
+            w.state.setdefault(key, {})[branch] = pair
+            w.log('fail', f"{epic['key']}: {key} {branch} не прошла приёмку: {why}")
+            w.save()
+            report_failure(m, epic, repo, key, branch, why, tail)
+            return False
+        w.permit()
+        repo.merge(branch, epic.get('commit_ref', key))
+        w.log('merge', f"{epic['key']}: {key} {branch} принята и влита в {repo.base}")
+    if not is_done(issue):
+        m('issue', 'update', key, '--status', 'done', write=True)
+    issue['unmerged'] = []
+    issue['status'] = 'done'
+    return True
+
+
+def run_epic(epic, w, snapshot, frozen=False):
+    """frozen — цель на паузе: только читаем для снимка, ничего не назначаем, не повторяем и не сливаем."""
+    m = Multica(epic['workspace'], w.dry, w.permit)
+    if epic.get('kind') == 'issue':
+        root = m('issue', 'get', epic['key'])
+        stages = [{'stage': 1, 'issues': [root.get('issue', root)]}]
+    else:
+        stages = m('issue', 'children', epic['key']).get('stages', [])
+    repo = Repo(epic['repo'], epic.get('base', 'main')) if epic.get('repo') else None
+    if repo:
+        def branches_of(issue):
+            comments = items(m('issue', 'comment', 'list', issue['identifier']), 'comments')
+            return sorted({b for c in comments if c.get('author_type') == 'agent' for b in BRANCH.findall(c.get('content') or '')})
+        mark_unmerged(stages, branches_of, repo.merged)
+        for issue in [] if frozen else decide(stages)[1]:
+            accept_issue(m, repo, epic, issue, w)
+    stage, _, to_assign, held = decide(stages)
+    to_assign = to_assign[:epic.get('max_per_tick', 4)]
+    overrides = [] if frozen else epic.get('overrides', [])
+    levels = {}
+    for agent_id in {o['agent_id'] for o in overrides}:
+        a = m('agent', 'get', agent_id)
+        levels[agent_id] = a.get('agent', a).get('thinking_level')
+    for agent_id, level in override_levels(stages, overrides, {i['identifier'] for i in to_assign}, levels):
+        w.log('level', f"{epic['key']}: агент {agent_id[:8]} → уровень {level}")
+        m('agent', 'update', agent_id, '--thinking-level', level, write=True)
+    snap_issues = {}
+    snapshot['epics'].append({'key': epic['key'], 'name': epic.get('name', epic['key']), 'stage': stage,
+                              'kind': epic.get('kind', 'epic'), 'paused': frozen,
+                              'stages': [{'stage': st['stage'], 'issues': [
+                                  snap_issues.setdefault(i['identifier'], {
+                                      'key': i['identifier'], 'title': i.get('title', ''), 'status': status(i),
+                                      'assigned': bool(i.get('assignee_id')), 'held': HOLD in (i.get('description') or ''),
+                                      'unmerged': i.get('unmerged') or [], 'jobs': []}) for i in st['issues']]}
+                                  for st in sorted(stages, key=lambda s: s['stage'])]})
+    if stage is None:
+        return
+    for issue in held:
+        print(f"{epic['key']}: стадия {stage}, {issue['identifier']} ждёт заказчика")
+    active = next(st for st in stages if st['stage'] == stage)
+    now = now_utc()
+    retries = w.state.setdefault('_quota_retry', {})
+    names = snapshot.get('agent_names', {})
+    for issue in active['issues']:
+        key = issue['identifier']
+        if not issue.get('assignee_id') or issue in held:
+            continue
+        runs = items(m('issue', 'runs', key), 'runs')
+        snap_issues[key]['jobs'] = jobs_of(runs, names)
+        if frozen or closed(issue) or issue.get('unmerged'):
+            continue
+        if quota_retry_due(runs, now, retries.get(key), epic.get('quota_retry_minutes', 20)):
+            w.log('retry', f"{epic['key']}: {key} упала на лимите провайдера — повтор")
+            m('issue', 'rerun', key, write=True)
+            if not w.dry:
+                retries[key] = now.isoformat()
+    for issue in [] if frozen else to_assign:
+        w.log('assign', f"{epic['key']}: стадия {stage}, {issue['identifier']} → сквад")
+        if status(issue) in ('backlog', None):
+            m('issue', 'update', issue['identifier'], '--status', 'todo', write=True)
+        m('issue', 'assign', issue['identifier'], '--to-id', epic['squad_id'], write=True)
+
+
+def apply_profile(m, agent_id, p):
+    args = ['agent', 'update', agent_id, '--runtime-id', p['runtime_id'], '--model', p.get('model', ''),
+            '--thinking-level', p.get('thinking_level', ''), '--custom-args', json.dumps(p.get('custom_args', []), ensure_ascii=False)]
+    m(*args, write=True)
+
+
+def run_providers(cfg, w, snapshot):
+    # Общий lock с пультом закрывает гонку «прочитал auto → пользователь выбрал вручную → перезаписал».
+    with control.Store().locked() as settings:
+        if cfg.get('subscriptions'):
+            control.export_subscriptions(cfg, settings)
+        if settings.get('paused'):
+            return
+        _run_providers(cfg, w, snapshot, settings)
+
+
+def _run_providers(cfg, w, snapshot, settings):
+    pc = cfg.get('providers')
+    if not pc:
+        return
+    clients = {}
+    names = control.runtime_names(cfg, settings)
+    now = now_utc()
+    avail = control.availability(cfg, names)
+    st = w.state.setdefault('_providers', {})
+    # Цепочки из конфига и сохранённые на экране агента в Multica.
+    for agent_id, a in control.agent_chains(cfg, settings).items():
+        chain = a['chain']
+        ws = a.get('workspace') or pc['workspace']
+        w.ws = ws
+        m = clients.setdefault(ws, Multica(ws, w.dry))
+        entry = st.setdefault(agent_id, {'idx': 0, 'since': None})
+        actual = m('agent', 'get', agent_id)
+        actual = actual.get('agent', actual)
+        matched = next((i for i, p in enumerate(chain) if p['runtime_id'] == actual.get('runtime_id')
+                        and (p.get('model') or '') == (actual.get('model') or '')), None)
+        if matched is not None and matched != entry.get('idx'):
+            entry.update(idx=matched, since=now.isoformat())
+        chosen = settings.get('agents', {}).get(agent_id, {})
+        mode = chosen.get('mode', 'auto')
+        if matched is None:
+            # Внешний профиль не угадываем и автоматически не перетираем.
+            mode = 'manual'
+        runs = items(m('agent', 'tasks', agent_id, '--limit', '30'), 'tasks')
+        last = latest(runs) or {}
+        if a.get('pending_apply'):
+            # Новая цепочка с экрана агента: ставим её, когда агент свободен — идущий ран не трогаем.
+            if any(r.get('status') in control.ACTIVE for r in runs):
+                continue
+            start = control.next_profile([avail.get(p['runtime_id']) for p in chain], 0) or 0
+            p = chain[start]
+            w.log('provider', f"{a['name']}: новая цепочка, работает на "
+                              f"{names.get(p['runtime_id'], p['runtime_id'][:8])} {p.get('model') or ''}".rstrip())
+            apply_profile(m, agent_id, p)
+            if not w.dry:
+                settings['chains'][agent_id]['pending_apply'] = False
+                entry.update(idx=start, since=now.isoformat(), waiting=None)
+                settings.setdefault('agents', {}).pop(agent_id, None)
+            actual, matched, mode = p, start, 'auto'
+        cooldowns = entry.setdefault('cooldowns', {})
+        if mode == 'auto' and last and is_quota_failure(last) and entry.get('failure_seen') != last.get('id'):
+            if not entry.get('since') or ts(last.get('created_at')) >= ts(entry['since']):
+                cooldowns[str(entry['idx'])] = (now + dt.timedelta(minutes=20)).isoformat()
+                entry['failure_seen'] = last.get('id')
+        statuses = [False if ts(cooldowns.get(str(i))) and ts(cooldowns[str(i)]) > now
+                    else avail.get(p['runtime_id']) for i, p in enumerate(chain)]
+        waiting = entry.get('waiting')
+        if waiting and mode == 'auto' and not any(r.get('status') in control.ACTIVE for r in runs):
+            # Будильник: вся цепочка была на лимите. Слабее порога не подставляем — ждём сброса и будим сами.
+            ready = next((i for i, x in enumerate(statuses) if x is True), None)
+            if ready is None and now >= ts(waiting['wake_at']):
+                ready = waiting.get('idx', entry.get('idx', 0))
+            if ready is not None:
+                p = chain[ready]
+                w.log('provider', f"{a['name']}: будильник — квота сброшена, работает на "
+                                  f"{names.get(p['runtime_id'], p['runtime_id'][:8])} {p.get('model') or ''}".rstrip())
+                if ready != entry.get('idx') or matched is None:
+                    apply_profile(m, agent_id, p)
+                    actual = p
+                if not w.dry:
+                    entry.update(idx=ready, since=now.isoformat(), waiting=None)
+                rerun_quota_failed(m, w, a, runs, agent_id)
+            snapshot['agents'].append({'name': a['name'], 'idx': entry.get('idx', 0), 'chain_len': len(chain),
+                                       'runtime': names.get(actual.get('runtime_id'), actual.get('runtime_id', '—')),
+                                       'model': actual.get('model') or '—', 'since': entry.get('since'), 'mode': mode,
+                                       'waiting_until': (entry.get('waiting') or {}).get('wake_at'),
+                                       'last_status': last.get('status'), 'last_at': last.get('created_at')})
+            continue
+        decision = provider_decision(runs, entry, len(chain), now, pc.get('restore_hours', 5), mode, statuses,
+                                     pc.get('restore_minutes', 30))
+        if decision and decision[0] in ('switch', 'restore'):
+            idx = decision[1]
+            p = chain[idx]
+            verb = 'лимит или недоступный профиль, переезжает на' if decision[0] == 'switch' else 'возвращается на'
+            w.log('provider', f"{a['name']}: {verb} {names.get(p['runtime_id'], p['runtime_id'][:8])} {p.get('model') or ''}".rstrip())
+            apply_profile(m, agent_id, p)
+            if not w.dry:
+                entry.update(idx=idx, since=now.isoformat())
+                actual = p
+            if decision[0] == 'switch':
+                rerun_quota_failed(m, w, a, runs, agent_id)
+        elif decision and decision[0] == 'exhausted' and entry.get('exhausted_logged') != last.get('id'):
+            wake_idx, wake = wake_target(chain, names, cfg, now, pc.get('quota_retry_minutes', 20))
+            w.log('fail', f"{a['name']}: вся цепочка на лимите, ждёт сброса — будильник на "
+                          f"{wake.astimezone(control.MSK):%d.%m %H:%M} МСК")
+            if not w.dry:
+                entry['exhausted_logged'] = last.get('id')
+                entry['waiting'] = {'since': now.isoformat(), 'wake_at': wake.isoformat(), 'idx': wake_idx}
+        snapshot['agents'].append({'name': a['name'], 'idx': entry.get('idx', 0), 'chain_len': len(chain),
+                                   'runtime': names.get(actual.get('runtime_id'), actual.get('runtime_id', '—')),
+                                   'model': actual.get('model') or '—', 'since': entry.get('since'), 'mode': mode,
+                                   'waiting_until': (entry.get('waiting') or {}).get('wake_at'),
+                                   'last_status': last.get('status'), 'last_at': last.get('created_at')})
+
+
+def wake_target(chain, names, cfg, now, fallback_minutes):
+    """Профиль цепочки, чья подписка освободится раньше всех, и когда. Сброс неизвестен — через fallback_minutes."""
+    rows = control.quota_rows(cfg)
+    best = None
+    for i, p in enumerate(chain):
+        at = control.reset_at(names.get(p['runtime_id'], ''), rows, now)
+        if at and (best is None or at < best[1]):
+            best = (i, max(at, now))
+    return best or (0, now + dt.timedelta(minutes=fallback_minutes))
+
+
+def rerun_quota_failed(m, w, a, runs, agent_id=None):
+    """Перезапустить задачи, где последний ран этого агента упал на лимите и по задаче ничего не работает.
+    Смотрим ран агента, а не задачи: лидер мог отработать после падения исполнителя и встать ждать сброса."""
+    failed = {r['issue_id'] for r in runs if is_quota_failure(r) and r.get('issue_id')}
+    for issue_id in failed:
+        issue_runs = items(m('issue', 'runs', issue_id), 'runs')
+        own = [r for r in issue_runs if not agent_id or r.get('agent_id') == agent_id]
+        if own and not any(r.get('status') in control.ACTIVE for r in issue_runs) and is_quota_failure(latest(own)):
+            w.log('retry', f"{a['name']}: перезапуск задачи {issue_id[:8]} после лимита")
+            m('issue', 'rerun', issue_id, write=True)
+
+
+def needs_seed(status):
+    """Справочники стенда ни разу не загружались и загрузка сейчас не идёт — свежая база после пересборки."""
+    rows = status.get('items', [])
+    if not rows:
+        return True
+    return any(r.get('lastSuccessAt') is None and (r.get('lastRun') or {}).get('status') not in ('running', 'queued', 'pending')
+               for r in rows)
+
+
+class Stand:
+    """HTTP-клиент стенда сервиса: тестовый вход оператором (cookie + CSRF), переиспользует сессию между тиками."""
+
+    def __init__(self, url, principal, saved):
+        self.url, self.principal, self.saved = url.rstrip('/'), principal, saved
+
+    def call(self, method, path, body=None):
+        headers = {'Origin': self.url, 'Accept': 'application/json'}
+        if body is not None:
+            headers['Content-Type'] = 'application/json'
+        if self.saved.get('cookie'):
+            headers['Cookie'] = 'resource_session=' + self.saved['cookie']
+            headers['x-csrf-token'] = self.saved.get('csrf', '')
+        req = urllib.request.Request(self.url + path, data=None if body is None else json.dumps(body).encode(), headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.status, parse_json(r.read().decode() or '{}'), r.headers.get_all('Set-Cookie') or []
+        except urllib.error.HTTPError as e:
+            return e.code, {}, []
+
+    def login(self):
+        self.saved.clear()
+        code, data, cookies = self.call('POST', '/auth/test/login', {'principalId': self.principal})
+        if code != 200:
+            raise RuntimeError(f'тестовый вход оператором: HTTP {code}')
+        for c in cookies:
+            m = re.match(r'resource_session=([^;]+)', c)
+            if m:
+                self.saved['cookie'] = m.group(1)
+        self.saved['csrf'] = data.get('csrfToken', '')
+
+    def authed(self, method, path, body=None):
+        code, data, _ = self.call(method, path, body)
+        if code in (401, 403):
+            self.login()
+            code, data, _ = self.call(method, path, body)
+        return code, data
+
+
+def run_stands(cfg, w, snapshot):
+    for s in cfg.get('stands', []):
+        saved = w.state.setdefault('_stands', {}).setdefault(s['name'], {})
+        st = Stand(s['url'], s['operator_principal'], saved)
+        code, status = st.authed('GET', '/api/v1/sync/status')
+        if code != 200:
+            snapshot['stands'].append({'name': s['name'], 'url': s['url'], 'line': f'статус справочников недоступен: HTTP {code}'})
+            continue
+        if needs_seed(status):
+            w.log('stand', f"стенд {s['name']}: справочники пустые после пересборки — загружаю ({', '.join(s.get('sources', ['sphere']))})")
+            if not w.dry:
+                for source in s.get('sources', ['sphere']):
+                    w.permit()
+                    code, _ = st.authed('POST', f'/api/v1/sync/{source}', {})
+                    if code not in (200, 202):
+                        w.log('error', f"стенд {s['name']}: загрузка {source} — HTTP {code}")
+        row = (status.get('items') or [{}])[0]
+        counts = row.get('counts') or {}
+        snapshot['stands'].append({'name': s['name'], 'url': s['url'], 'line':
+                                   f"справочники: {counts.get('employees', 0)} сотр., {counts.get('projects', 0)} проектов, "
+                                   f"обновлены {(row.get('lastSuccessAt') or 'никогда')[:16].replace('T', ' ')}"})
+
+
+def quotas(cfg):
+    """Загрузка подписок: окна из data.json дашборда usage-dash и последний выбор аккаунта обёрток."""
+    out = []
+    try:
+        for row in json.loads(Path(cfg['usage_json']).read_text()).get('rows', []) if cfg.get('usage_json') else []:
+            wins = ', '.join(f"{w['label']} {w['used']:.0f}%" + (f" (сброс {w['reset']})" if w.get('reset') else '')
+                             for w in row.get('windows', []) if w.get('used') is not None)
+            out.append({'name': row.get('name', ''), 'line': wins or row.get('error') or 'нет данных'})
+    except (OSError, ValueError, KeyError, TypeError):
+        out.append({'name': 'usage-dash', 'line': 'нет данных'})
+    for name, path in cfg.get('quota_logs', {}).items():
+        try:
+            out.append({'name': name, 'line': Path(path).read_text().strip().splitlines()[-1]})
+        except (OSError, IndexError):
+            out.append({'name': name, 'line': 'нет данных'})
+    return out
+
+
+STATUS_RU = {'backlog': 'ждёт этапа', 'todo': 'к выполнению', 'in_progress': 'в работе', 'in_review': 'сдана',
+             'done': 'готово', 'blocked': 'стоит', 'cancelled': 'отменена'}
+KIND_RU = {'merge': 'слияние', 'fail': 'провал', 'assign': 'запуск', 'retry': 'повтор', 'provider': 'провайдер',
+           'level': 'уровень', 'error': 'ошибка', 'stand': 'стенд'}
+
+
+ICON = {  # статус пайплайна GitLab: цвет и символ в кружке
+    'success': ('#108548', '✓'), 'running': ('#1f75cb', '●'), 'review': ('#6e49cb', '▸'), 'failed': ('#dd2b0e', '✕'),
+    'blocked': ('#c17d10', '!'), 'created': ('#a4a3a8', '○'), 'paused': ('#a4a3a8', 'Ⅱ'), 'canceled': ('#737278', '∅'),
+}
+LABEL = {'success': 'готово', 'running': 'в работе', 'review': 'на приёмке', 'failed': 'упало', 'blocked': 'стоит',
+         'created': 'ждёт этапа', 'paused': 'ждёт заказчика', 'canceled': 'отменена'}
+
+
+def issue_state(i):
+    if i['held'] and i['status'] not in ('done', 'cancelled'):
+        return 'paused'
+    if i['unmerged'] or i['status'] == 'in_review':
+        return 'review'
+    return {'done': 'success', 'in_progress': 'running', 'todo': 'running', 'blocked': 'blocked',
+            'cancelled': 'canceled', 'canceled': 'canceled'}.get(i['status'], 'created')
+
+
+def job_state(j):
+    if j['status'] in ACTIVE_RUN:
+        return 'running'
+    if j['status'] == 'completed':
+        return 'success'
+    if j['status'] == 'failed':
+        return 'blocked' if j.get('quota') else 'failed'
+    return 'canceled' if j['status'] in ('cancelled', 'canceled') else 'created'
+
+
+def short_title(t): return re.sub(r'\s*T-\d+\s*$', '', re.sub(r'^[^:]{2,40}:\s*', '', t or ''))
+
+
+def dur(s):
+    if s is None:
+        return ''
+    return f'{s // 3600} ч {s % 3600 // 60} мин' if s >= 3600 else f'{s // 60} мин {s % 60} с' if s >= 60 else f'{s} с'
+
+
+def render(snapshot, events):
+    e = html.escape
+
+    def icon(state, big=False):
+        color, sym = ICON[state]
+        cls = 'ic big' if big else 'ic'
+        spin = ' spin' if state == 'running' else ''
+        return f"<span class='{cls}{spin}' style='border-color:{color};color:{color}' title='{LABEL[state]}'>{sym}</span>"
+
+    css = (
+        'body{font:14px/1.45 -apple-system,system-ui,sans-serif;margin:0;background:#fbfafd;color:#28272d}'
+        'main{max-width:1400px;margin:auto;padding:20px}h1{font-size:20px;margin:0}h2{font-size:16px;margin:0 0 10px}'
+        '.muted{color:#737278}.card{background:#fff;border:1px solid #dcdcde;border-radius:8px;padding:16px;margin:16px 0}'
+        '.head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.badge{display:inline-flex;align-items:center;gap:6px;'
+        'border:1px solid;border-radius:14px;padding:2px 10px 2px 4px;font-weight:600;font-size:13px}'
+        '.ic{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border:1.5px solid;border-radius:50%;'
+        'font-size:10px;font-weight:700;flex:none;background:#fff}.ic.big{width:20px;height:20px;font-size:12px}'
+        '.spin{border-style:dashed;animation:sp 2s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}'
+        '.pipe{display:flex;overflow-x:auto;padding:8px 0 4px;gap:0}.stage{min-width:210px;padding:0 18px;position:relative}'
+        '.stage+.stage:before{content:"";position:absolute;left:0;top:44px;width:18px;border-top:2px solid #dcdcde}'
+        '.stage h3{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#535158;margin:0 0 10px}'
+        '.stage.active h3{color:#1f75cb}.job{display:flex;align-items:center;gap:8px;border:1px solid #dcdcde;border-radius:24px;'
+        'padding:6px 12px 6px 8px;margin-bottom:8px;background:#fff;max-width:240px}.job:hover{background:#f5f5f6}'
+        '.job .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.job .k{color:#737278;font-size:12px}'
+        '.runs{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:6px 0 14px}.run{display:inline-flex;align-items:center;'
+        'gap:6px;border:1px solid #dcdcde;border-radius:16px;padding:3px 10px 3px 4px;font-size:13px;background:#fff}'
+        '.arrow{color:#bfbfc3}.sub{margin-top:4px}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ececef;'
+        'padding:7px 8px;text-align:left;vertical-align:top}th{font-weight:600;color:#535158;font-size:13px}'
+        '.k-fail,.k-error{color:#dd2b0e}.k-merge{color:#108548}.k-provider{color:#c17d10}.k-retry{color:#1f75cb}'
+        'code{font-size:12px}')
+    parts = [f"<div class='head'><h1>Сторож multica</h1><span class='muted'>тик {e(snapshot['tick'])} UTC · страница "
+             f"обновляется каждую минуту, сторож — каждые 2</span></div>"]
+    for err in snapshot.get('errors', []):
+        parts.append(f"<div class='card k-error'><b>Ошибка тика:</b><pre>{e(err)}</pre></div>")
+    last_event = {}
+    for ev in events:
+        m = re.search(r'\b([A-Z]+-\d+)\b', ev['text'].split(': ', 1)[-1])
+        if m and ev['kind'] in ('merge', 'fail'):
+            last_event[m.group(1)] = ev
+    for ep in snapshot['epics']:
+        all_issues = [i for st in ep['stages'] for i in st['issues']]
+        done = sum(issue_state(i) == 'success' for i in all_issues)
+        ep_state = 'success' if ep['stage'] is None else 'running'
+        cols = ''
+        for st in ep['stages']:
+            jobs = ''.join(
+                f"<div class='job' title='{e(i['title'])}'>{icon(issue_state(i))}<div class='t'>"
+                f"<div class='k'>{e(i['key'])} · {e(LABEL[issue_state(i)])}</div>{e(short_title(i['title']))}</div></div>"
+                for i in st['issues'])
+            active = ' active' if st['stage'] == ep['stage'] else ''
+            cols += f"<div class='stage{active}'><h3>Этап {st['stage']}</h3>{jobs}</div>"
+        detail = ''
+        for st in ep['stages']:
+            if st['stage'] != ep['stage']:
+                continue
+            for i in st['issues']:
+                if not i['jobs'] and not i['unmerged']:
+                    continue
+                chain = []
+                for j in i['jobs']:
+                    extra = ' · лимит' if j.get('quota') else ''
+                    chain.append(f"<span class='run' title='{e(j['status'] or '')} {e((j['at'] or '')[:16])}'>"
+                                 f"{icon(job_state(j))}{e(j['agent'])}<span class='muted'>{e(dur(j['secs']))}{extra}</span></span>")
+                ev = last_event.get(i['key'])
+                acc = 'review' if i['unmerged'] else ('success' if i['status'] == 'done' else
+                                                      'failed' if ev and ev['kind'] == 'fail' else 'created')
+                chain.append(f"<span class='run'>{icon(acc)}приёмка и слияние</span>")
+                detail += (f"<div class='sub'><b>{e(i['key'])}</b> {e(short_title(i['title']))}</div>"
+                           f"<div class='runs'>{'<span class=arrow>→</span>'.join(chain)}</div>")
+        parts.append(
+            f"<div class='card'><div class='head'><span class='badge' style='border-color:{ICON[ep_state][0]};color:{ICON[ep_state][0]}'>"
+            f"{icon(ep_state, True)}{e(LABEL[ep_state] if ep['stage'] else 'пройден')}</span><h2 style='margin:0'>{e(ep['key'])} · "
+            f"{e(ep['name'])}</h2><span class='muted'>готово {done} из {len(all_issues)}"
+            f"{' · активный этап ' + str(ep['stage']) if ep['stage'] else ''}</span></div>"
+            f"<div class='pipe'>{cols}</div>"
+            + (f"<h2 style='margin-top:12px'>Джобы активного этапа</h2>{detail}" if detail else '') + "</div>")
+    if snapshot['agents']:
+        rows = ''.join(
+            f"<tr><td>{icon(job_state({'status': a['last_status']}))} {e(a['name'])}</td><td>{e(a['runtime'])}</td><td>{e(a['model'])}</td>"
+            f"<td>{'основной' if a['idx'] == 0 else '<b>запасной ' + str(a['idx']) + '</b> с ' + e((a['since'] or '')[:16].replace('T', ' '))}</td>"
+            f"<td class='muted'>{e(a['last_status'] or '—')} {e((a['last_at'] or '')[:16].replace('T', ' '))}</td></tr>"
+            for a in snapshot['agents'])
+        parts.append(f"<div class='card'><h2>Агенты и провайдеры</h2><table><tr><th>Агент</th><th>Провайдер</th><th>Модель</th>"
+                     f"<th>Профиль</th><th>Последний ран</th></tr>{rows}</table></div>")
+    if snapshot.get('stands'):
+        rows = ''.join(f"<tr><td><a href='{e(s['url'])}'>{e(s['name'])}</a></td><td>{e(s['url'])}</td><td>{e(s['line'])}</td></tr>"
+                       for s in snapshot['stands'])
+        parts.append(f"<div class='card'><h2>Стенды</h2><table>{rows}</table></div>")
+    if snapshot['quotas']:
+        rows = ''.join(f"<tr><td>{e(q['name'])}</td><td><code>{e(q['line'])}</code></td></tr>" for q in snapshot['quotas'])
+        parts.append(f"<div class='card'><h2>Подписки — окна и последний выбор аккаунта</h2><table>{rows}</table></div>")
+    rows = ''.join(f"<tr><td class='muted'>{e(ev['t'][:16].replace('T', ' '))}</td><td class='k-{e(ev['kind'])}'>"
+                   f"{e(KIND_RU.get(ev['kind'], ev['kind']))}</td><td>{e(ev['text'])}</td></tr>" for ev in reversed(events[-150:]))
+    parts.append(f"<div class='card'><h2>Журнал</h2><table>{rows or '<tr><td>пока пусто</td></tr>'}</table></div>")
+    return (f"<!doctype html><html lang='ru'><head><meta charset='utf-8'><meta http-equiv='refresh' content='60'>"
+            f"<meta name='viewport' content='width=device-width,initial-scale=1'><meta name='robots' content='noindex'>"
+            f"<title>Сторож multica</title><style>{css}</style></head><body><main>{''.join(parts)}</main></body></html>")
+
+
+def write_status(cfg, snapshot, events):
+    d = cfg.get('status_dir')
+    if not d:
+        return
+    Path(d).mkdir(parents=True, exist_ok=True)
+    for name, body in (('index.html', render(snapshot, events)),
+                       ('status.json', json.dumps({**snapshot, 'events': events[-150:]}, ensure_ascii=False, indent=1))):
+        tmp = Path(d, name + '.tmp')
+        tmp.write_text(body)
+        os.chmod(tmp, 0o644)
+        tmp.replace(Path(d, name))
+
+
+def run(cfg, dry):
+    w = Watch(dry)
+    with control.Store().locked() as settings:
+        selected = [t for t in control.targets(cfg, settings) if t.get('enabled', True)]
+        paused = settings.get('paused', False)
+        chains = control.agent_chains(cfg, settings)
+    snapshot = {'tick': now_utc().isoformat(timespec='seconds')[:19].replace('T', ' '), 'epics': [], 'agents': [], 'errors': [],
+                'paused': paused, 'stands': [], 'agent_names': {**cfg.get('agent_names', {}),
+                  **{aid: a['name'] for aid, a in chains.items()}}}
+    # Цель на паузе (или весь конвейер) всё равно читается — пульт рисует по снимку доску.
+    steps = [(epic['key'], epic['key'], paused or epic.get('paused', False),
+              lambda epic=epic, frozen=paused or epic.get('paused', False): run_epic(epic, w, snapshot, frozen=frozen))
+             for epic in selected]
+    steps += [('провайдеры', None, False, lambda: run_providers(cfg, w, snapshot)),
+              ('стенды', None, False, lambda: run_stands(cfg, w, snapshot))]
+    workspaces = {t['key']: t.get('workspace') for t in selected}
+    for step, target_key, frozen, fn in steps:
+        w.target_key = target_key
+        w.ws = workspaces.get(target_key)
+        try:
+            if not frozen:
+                w.permit()
+            fn()
+        except AutomationPaused as e:
+            print(str(e))
+        except Exception as e:
+            msg = f'{step}: {e}'
+            w.log('error', msg)
+            snapshot['errors'].append(msg + '\n' + traceback.format_exc()[-1200:])
+        w.save()
+    snapshot['quotas'] = quotas(cfg)
+    if not dry:
+        write_status(cfg, snapshot, w.state.get('_events', []))
+
+
+if __name__ == '__main__':
+    run(json.loads(CONFIG.read_text()), '--dry-run' in sys.argv)
