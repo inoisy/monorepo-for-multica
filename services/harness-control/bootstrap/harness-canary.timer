@@ -1,0 +1,10 @@
+[Unit]
+Description=harness-canary: запуск раз в минуту
+
+[Timer]
+OnCalendar=minutely
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

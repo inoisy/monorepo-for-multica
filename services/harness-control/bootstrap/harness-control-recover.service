@@ -1,0 +1,12 @@
+[Unit]
+Description=harness-control: довести прерванные операции после перезагрузки
+After=local-fs.target systemd-journald.service
+ConditionPathExists=/usr/local/sbin/harness-priv
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/harness-priv recover
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,21 @@
+[Unit]
+Description=harness-canary: тестовый компонент harness-control
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+StateDirectory=harness-canary
+StateDirectoryMode=0755
+ExecStart=/usr/local/lib/harness-canary/canary.py
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+MemoryMax=128M
+TasksMax=32
+TimeoutStartSec=60

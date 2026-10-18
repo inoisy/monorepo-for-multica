@@ -1,0 +1,10 @@
+#!/usr/bin/python3 -I
+import os
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+# Из репозитория или распакованного пакета код лежит рядом (bin/../harness_control), из установки — в фиксированном каталоге root.
+PKG = os.path.dirname(HERE)
+sys.path.insert(0, PKG if os.path.isdir(os.path.join(PKG, 'harness_control')) else '/usr/local/lib/harness-control')
+from harness_control.cli import main
+sys.exit(main(sys.argv[1:]))

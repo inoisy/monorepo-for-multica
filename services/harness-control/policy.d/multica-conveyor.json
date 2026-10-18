@@ -1,0 +1,70 @@
+{
+  "component": "multica-conveyor",
+  "description": "Сторож конвейера эпиков и полоса провайдеров: один файл и общий control_state.py",
+  "source": {
+    "repo": "https://github.com/inoisy/monorepo-for-multica.git",
+    "path": "services/multica-conveyor",
+    "require_ref": "origin/main"
+  },
+  "targets": [
+    {"src": "multica-conveyor", "dst": "/usr/local/bin/multica-conveyor", "mode": "0755"},
+    {"src": "control_state.py", "dst": "/usr/local/bin/control_state.py", "mode": "0644"},
+    {"src": "control_state.py", "dst": "/opt/multica-control/control_state.py", "mode": "0644"}
+  ],
+  "timers": ["multica-conveyor.timer"],
+  "busy_units": ["multica-conveyor.service", "multica-provider.service"],
+  "restart_units": [
+    {"unit": "multica-control.service", "when_changed": ["/opt/multica-control/control_state.py"]}
+  ],
+  "required_units": [
+    "multica-conveyor.service", "multica-conveyor.timer",
+    "multica-provider.service", "multica-provider.timer", "multica-control.service"
+  ],
+  "lanes": {"providers": {"timers": ["multica-provider.timer"]}},
+  "baseline_capabilities": {"lanes": ["epics"]},
+  "capabilities": {"argv": ["/usr/bin/python3", "-I", "{work}/multica-conveyor", "--capabilities"]},
+  "validate": {
+    "checks": [
+      {"name": "contract-smoke", "argv": ["/usr/bin/python3", "-I", "{checks}/contract_smoke.py", "{work}"]},
+      {"name": "state-compat", "argv": ["/usr/bin/python3", "-I", "{checks}/state_compat.py", "{work}"]},
+      {"name": "subs-pick-smoke", "argv": ["/usr/bin/python3", "-I", "{checks}/subs_pick_smoke.py", "{work}"]}
+    ],
+    "tests": {
+      "argv": ["/usr/bin/python3", "-I", "-m", "unittest", "discover", "-s", "tests", "-q"],
+      "count_regex": "Ran (\\d+) tests?",
+      "min": 69
+    }
+  },
+  "sandbox": {"memory_max": "2G", "tasks_max": 256, "runtime_max_sec": 1800, "path": "/usr/bin:/bin"},
+  "health": {
+    "timeout": 600,
+    "poll": 5,
+    "units": [
+      {"unit": "multica-conveyor.service", "timer": "multica-conveyor.timer"},
+      {"unit": "multica-provider.service", "timer": "multica-provider.timer", "lane": "providers"}
+    ],
+    "status_files": [
+      {"path": "/home/agents/.local/state/multica-conveyor/status/status.json", "tick_key": "tick",
+       "errors_key": "errors", "events_key": "events", "bad_event_kinds": ["error"]},
+      {"path": "/home/agents/.local/state/multica-conveyor/providers-status.json", "tick_key": "tick",
+       "errors_key": "errors", "lane": "providers"}
+    ],
+    "http": [{"url": "http://127.0.0.1:8098/", "expect": [200, 301, 302, 303, 401, 403]}],
+    "commands": [
+      {"name": "control_state импортируется", "argv": ["/usr/bin/python3", "-I", "-c",
+        "import sys; sys.path.insert(0, '/usr/local/bin'); import control_state"]},
+      {"name": "subs-pick выбирает подписку", "argv": ["/usr/bin/python3", "-I", "/usr/local/bin/subs-pick", "--decide",
+        "{\"order\": \"first\", \"subs\": [{\"id\": \"a\", \"state\": null, \"caps\": {}}, {\"id\": \"b\", \"state\": null, \"caps\": {}}]}"]}
+    ]
+  },
+  "dependencies": {
+    "tools": ["git", "multica", "python3"],
+    "fresh_files": [
+      {"name": "usage_json", "path_from_json": {"file": "/etc/multica-conveyor.json", "key": "usage_json"}, "max_age": 1800}
+    ],
+    "state_files": [
+      "/home/agents/.local/state/multica-conveyor/state.json",
+      "/home/agents/.local/state/multica-control/controls.json"
+    ]
+  }
+}

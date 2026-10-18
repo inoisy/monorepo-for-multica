@@ -1,0 +1,5 @@
+{
+  "agent_user": "agents",
+  "max_parallel_validate": 1,
+  "lock_timeout": 3600
+}
