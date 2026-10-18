@@ -132,6 +132,14 @@ class Redact(unittest.TestCase):
     def test_значения_из_конфига_вырезаются_дословно(self):
         self.assertEqual(c.redact('prefix zzzzzzzz suffix', ['zzzzzzzz']), f'prefix {c.REDACTED} suffix')
 
+    def test_длинная_строка_редактируется_за_линейное_время(self):
+        # минифицированный бандл в выводе приёмки: квадратичный шаблон держал бы тик часами
+        for line in ('a.' * 200000, 'a-' * 200000, 'token' * 80000, '://' + 'a:' * 150000):
+            started = time.monotonic()
+            c.redact(line)
+            self.assertLess(time.monotonic() - started, 5, line[:10])
+        self.assertEqual(c.redact('x ' * 1000 + 'API_KEY=abcdef123456'), 'x ' * 1000 + f'API_KEY={c.REDACTED}')
+
 
 class Capabilities(unittest.TestCase):
     def test_capabilities_печатает_json_без_конфига(self):
