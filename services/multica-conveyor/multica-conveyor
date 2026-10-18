@@ -465,8 +465,11 @@ def run_epic(epic, w, snapshot, frozen=False):
     if epic.get('kind') == 'issue':
         root = m('issue', 'get', epic['key'])
         stages = [{'stage': 1, 'issues': [root.get('issue', root)]}]
+        unstaged = []
     else:
-        stages = m('issue', 'children', epic['key']).get('stages', [])
+        children = m('issue', 'children', epic['key'])
+        stages = children.get('stages', [])
+        unstaged = children.get('unstaged', [])
     repo = Repo(epic['repo'], epic.get('base', 'main')) if epic.get('repo') else None
     if repo:
         def branches_of(issue):
@@ -493,7 +496,11 @@ def run_epic(epic, w, snapshot, frozen=False):
                                       'key': i['identifier'], 'title': i.get('title', ''), 'status': status(i),
                                       'assigned': bool(i.get('assignee_id')), 'held': HOLD in (i.get('description') or ''),
                                       'unmerged': i.get('unmerged') or [], 'jobs': []}) for i in st['issues']]}
-                                  for st in sorted(stages, key=lambda s: s['stage'])]})
+                                  for st in sorted(stages, key=lambda s: s['stage'])],
+                              # Подзадачи без этапа сторож не назначает, но на странице они видны.
+                              'unstaged': [{'key': i['identifier'], 'title': i.get('title', ''), 'status': status(i),
+                                            'assigned': bool(i.get('assignee_id')), 'held': False, 'unmerged': [],
+                                            'jobs': []} for i in unstaged]})
     if stage is None:
         return
     for issue in held:
@@ -895,7 +902,8 @@ def render(snapshot, events):
         if m and ev['kind'] in ('merge', 'fail'):
             last_event[m.group(1)] = ev
     for ep in snapshot['epics']:
-        all_issues = [i for st in ep['stages'] for i in st['issues']]
+        unstaged = ep.get('unstaged', [])
+        all_issues = [i for st in ep['stages'] for i in st['issues']] + unstaged
         done = sum(issue_state(i) == 'success' for i in all_issues)
         ep_state = 'success' if ep['stage'] is None else 'running'
         cols = ''
@@ -906,6 +914,12 @@ def render(snapshot, events):
                 for i in st['issues'])
             active = ' active' if st['stage'] == ep['stage'] else ''
             cols += f"<div class='stage{active}'><h3>Этап {st['stage']}</h3>{jobs}</div>"
+        if unstaged:
+            jobs = ''.join(
+                f"<div class='job' title='{e(i['title'])}'>{icon(issue_state(i))}<div class='t'>"
+                f"<div class='k'>{e(i['key'])} · {e(LABEL[issue_state(i)])}</div>{e(short_title(i['title']))}</div></div>"
+                for i in unstaged)
+            cols += f"<div class='stage'><h3>Без этапа</h3>{jobs}</div>"
         detail = ''
         for st in ep['stages']:
             if st['stage'] != ep['stage']:
