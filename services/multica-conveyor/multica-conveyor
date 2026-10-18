@@ -43,6 +43,7 @@ STATE = Path(os.environ.get('MULTICA_CONVEYOR_STATE', Path.home() / '.local/stat
 CANCELLED = {'cancelled', 'canceled'}
 HOLD = '**Ждёт:**'
 BRANCH = re.compile(r'\bt-\d+-[a-z0-9][a-z0-9-]*[a-z0-9]\b')
+OWN_BRANCH = re.compile(r'[Вв]етк\w*[^\n`]{0,12}`(t-\d+-[a-z0-9][a-z0-9-]*[a-z0-9])`')
 DIFF_GUARD = re.compile(r'^\+.*(?:: any\b|as unknown as|@ts-(?:ignore|expect-error)|eslint-disable)', re.M)
 QUOTA = re.compile(r'usage limit|spend limit|rate.?limit|hit your .{0,20}limit|quota|too many requests|\b429\b', re.I)
 # Падения, которые лечатся повтором: ран не дошёл до работы из-за сервера, а не из-за задачи или модели.
@@ -486,6 +487,20 @@ def accept_issue(m, repo, epic, issue, w):
     return True
 
 
+def report_branches(comments):
+    """Ветки задачи для приёмки. Своя ветка — «ветка `имя`» в последнем отчёте агента: чужие ветки в тексте
+    (соседние задачи, сообщения о провале приёмки) её не подменяют. Нет такого отчёта — любые упоминания."""
+    agent = [c.get('content') or '' for c in sorted(comments, key=lambda c: c.get('created_at') or '')
+             if c.get('author_type') == 'agent']
+    for text in reversed(agent):
+        if 'втоприёмка' in text:
+            continue
+        own = OWN_BRANCH.findall(text)
+        if own:
+            return sorted(set(own))
+    return sorted({b for text in agent for b in BRANCH.findall(text)})
+
+
 def epic_entry(epic, stages, unstaged, stage, frozen, snap_issues):
     """Строка эпика для снимка страницы; джобы задач заполняет вызывающий в snap_issues."""
     return {'key': epic['key'], 'name': epic.get('name', epic['key']), 'stage': stage,
@@ -517,7 +532,7 @@ def run_epic(epic, w, snapshot, frozen=False):
     if repo:
         def branches_of(issue):
             comments = items(m('issue', 'comment', 'list', issue['identifier']), 'comments')
-            return sorted({b for c in comments if c.get('author_type') == 'agent' for b in BRANCH.findall(c.get('content') or '')})
+            return report_branches(comments)
         mark_unmerged(stages, branches_of, repo.merged)
         to_accept = [] if frozen else decide(stages)[1]
         if to_accept and w.publish_early:
