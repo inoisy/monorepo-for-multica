@@ -7,11 +7,14 @@ from .errors import HarnessError
 
 
 def main(argv, call=client.call, out=sys.stdout):
-    if not argv or argv[0] in ('-h', '--help') or argv[0] not in COMMANDS:
+    if not argv or argv[0] in ('-h', '--help'):
         out.write('harness-control <inspect|validate|deploy|rollback|op|log|ops> [аргументы]\n\n')
         for verb, spec in COMMANDS.items():
             out.write(f'  {verb:9} {spec["doc"]}\n')
-        return 0 if argv and argv[0] in ('-h', '--help') else 2
+        return 0 if argv else 2
+    if argv[0] not in COMMANDS:
+        out.write(client.dumps(client.unknown_verb(argv[0])) + '\n')
+        return 2
     verb, tokens = argv[0], argv[1:]
     try:
         parse(verb, tokens)  # та же проверка, что в harness-priv: отказ без sudo

@@ -149,7 +149,7 @@ class Harness:
                                'оператор (root): установить юниты пакетом install.sh')
         if self.store.release(policy.name, 'baseline') is None:
             raise HarnessError('not_installed', f'{policy.name}: baseline не записан',
-                               'оператор (root): sudo /usr/local/lib/harness-control/install.sh --adopt ' + policy.name)
+                               'оператор (root): sudo /usr/local/sbin/harness-priv adopt-baseline ' + policy.name)
 
     def _all_units(self, policy, required_only=False):
         units = list(policy.required_units)

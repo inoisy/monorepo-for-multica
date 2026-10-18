@@ -2,7 +2,6 @@
 import json
 import os
 import subprocess
-from pathlib import Path
 
 PRIV = '/usr/local/sbin/harness-priv'
 SUDO = ['sudo', '-n']
@@ -16,9 +15,15 @@ def dumps(result):
 
 
 def install_command():
-    here = Path(__file__).resolve().parents[1] / 'bootstrap' / 'install.sh'
-    where = str(here) if here.is_file() else '<каталог распакованного пакета>/bootstrap/install.sh'
-    return f'оператор (root): sudo bash {where}'
+    # Путь не берётся рядом с адаптером: из рабочего каталога агента он указал бы оператору на файл, который агент может менять.
+    return ('оператор (root): собрать пакет из проверенного коммита (bootstrap/build-release.sh), сверить SHA256, '
+            'распаковать в каталог root и выполнить sudo bash <пакет>/bootstrap/install.sh')
+
+
+def unknown_verb(verb):
+    """Отказ на глагол вне таблицы (в том числе административный): одинаковый у CLI и MCP."""
+    return {'error': 'verb_not_allowed', 'reason': f'неизвестное действие {str(verb)[:40]!r}',
+            'missing': 'действия оператора (adopt-baseline, recover) агенту недоступны'}
 
 
 def not_installed(reason):

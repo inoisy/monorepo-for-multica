@@ -15,7 +15,7 @@ def call_tool(name, arguments, call=client.call):
     """(isError, text): text — тот же JSON, что печатает CLI."""
     verb = BY_NAME.get(name)
     if verb is None:
-        return True, client.dumps({'error': 'bad_request', 'reason': f'нет инструмента {name}', 'missing': None})
+        return True, client.dumps(client.unknown_verb(str(name or '').removeprefix('harness_')))
     try:
         tokens = tokenize(verb, arguments or {})
     except HarnessError as e:

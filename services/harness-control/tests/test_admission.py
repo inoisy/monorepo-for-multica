@@ -84,6 +84,12 @@ class NotInstalled(HarnessCase):
                 fn()
             self.assertEqual(cm.exception.code, 'not_installed')
             self.assertIn('оператор', cm.exception.missing)
+        # названная оператору команда существует: harness-priv разбирает её как административный глагол
+        from harness_control.core import ADMIN_VERBS
+        command = cm.exception.missing.split('sudo ', 1)[1].split()
+        self.assertEqual(command[:2], ['/usr/local/sbin/harness-priv', 'adopt-baseline'])
+        self.assertIn(command[1], ADMIN_VERBS)
+        self.assertEqual(command[2], 'harness-canary')
         info = self.h.inspect('harness-canary')['components'][0]
         self.assertEqual(info['allowed_operations'], ['validate'])
 
@@ -102,8 +108,10 @@ class ClientNotInstalled(unittest.TestCase):
         result = client.call('inspect', [], exists=lambda p: False)
         self.assertEqual(result['error'], 'not_installed')
         self.assertIn('/usr/local/sbin/harness-priv', result['reason'])
-        self.assertRegex(result['missing'], r'^оператор \(root\): sudo bash \S+/bootstrap/install\.sh$')
-        self.assertIn(str(PKG / 'bootstrap' / 'install.sh'), result['missing'])
+        self.assertIn('sudo bash <пакет>/bootstrap/install.sh', result['missing'])
+        self.assertIn('SHA256', result['missing'])
+        # путь рядом с адаптером (рабочий каталог агента) оператору не предлагается
+        self.assertNotIn(str(PKG), result['missing'])
 
     def test_sudo_требует_пароль(self):
         fake = lambda *a, **k: subprocess.CompletedProcess(a, 1, '', 'sudo: a password is required')

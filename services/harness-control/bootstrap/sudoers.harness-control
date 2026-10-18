@@ -1,8 +1,8 @@
 # harness-control: единственный root-вход агента. Файл принадлежит root, режим 0440; ставит только install.sh.
 # Агент вызывает только перечисленные глаголы; административные (adopt-baseline, recover, run-op) ему недоступны.
 # MULTICA_AGENT_NAME и MULTICA_TASK_ID сохраняются ради аудита: атрибуция внутри uid agents декларативная.
-Defaults:agents env_keep += "MULTICA_AGENT_NAME MULTICA_TASK_ID"
-Defaults:agents !requiretty
+Defaults!/usr/local/sbin/harness-priv env_keep += "MULTICA_AGENT_NAME MULTICA_TASK_ID"
+Defaults!/usr/local/sbin/harness-priv !requiretty
 agents ALL=(root) NOPASSWD: /usr/local/sbin/harness-priv inspect, /usr/local/sbin/harness-priv inspect *
 agents ALL=(root) NOPASSWD: /usr/local/sbin/harness-priv validate *
 agents ALL=(root) NOPASSWD: /usr/local/sbin/harness-priv deploy *

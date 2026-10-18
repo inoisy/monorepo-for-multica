@@ -47,6 +47,11 @@ class Scripts(unittest.TestCase):
         self.assertEqual(verbs, {'inspect', 'validate', 'deploy', 'rollback', 'op', 'log', 'ops'})
         self.assertFalse({'adopt-baseline', 'recover', 'run-op'} & verbs)
         self.assertNotIn('ALL=(ALL)', ' '.join(rules))
+        # Defaults только для harness-priv: остальные правила sudo агента (stand, bio-*) не меняются
+        defaults = [l for l in rules if l.startswith('Defaults')]
+        self.assertTrue(defaults)
+        for line in defaults:
+            self.assertTrue(line.startswith('Defaults!/usr/local/sbin/harness-priv '), line)
 
     def test_юниты_проходят_systemd_analyze(self):
         if not shutil.which('systemd-analyze'):

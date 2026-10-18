@@ -54,8 +54,10 @@ def build_argv(systemd_run, limits, work_dir, checks_dir, argv, unit=None, extra
 
 def parse_outcome(returncode, stderr):
     """Первичная причина: exit code, сигнал, таймаут или oom-kill — как их видит systemd."""
-    result = (RESULT.search(stderr) or [None, None])[1]
-    m = TERMINATED.search(stderr)
+    # systemd-run печатает итог после вывода кандидата, поэтому верим последнему совпадению: раннее кандидат мог напечатать сам
+    results = RESULT.findall(stderr)
+    result = results[-1] if results else None
+    m = ([None] + list(TERMINATED.finditer(stderr)))[-1]
     code_kind, status, sig = (m.group(1), m.group(2), m.group(3)) if m else (None, None, None)
     killed = code_kind == 'killed'
     signal = (status if not status.isdigit() else (sig or status)) if killed else None

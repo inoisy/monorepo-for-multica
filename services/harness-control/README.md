@@ -115,6 +115,16 @@ harness-control, stand, пульт, guard'ы, MCP и навыки, бэкапы 
 
 ## Установка (оператор, root)
 
+До установки (без этого sudoers не ставить):
+- `main` монорепо защищена от прямой записи ключом агентов (см. «Условие безопасности»);
+- пакет собран оператором из проверенного коммита в каталоге root, а не взят готовым из каталога агента: между
+  `--check` и установкой агент может поменять файлы в своём каталоге;
+- установленные файлы сторожа — те, что записаны в git как baseline: `sha256sum /usr/local/bin/multica-conveyor
+  /usr/local/bin/control_state.py /opt/multica-control/control_state.py` → `cfda92b7…`, `5736e0ed…`, `5736e0ed…`
+  (установщик записывает baseline из того, что лежит на хосте, и не сверяет хэши);
+- `mconv`, `subs-pick` и `multica-conveyor` не запускать от root: после установки `control_state.py` выкладывает
+  агент, и от root он исполнил бы код агента.
+
 ```sh
 bash services/harness-control/bootstrap/build-release.sh <коммит>      # tar + SHA256SUMS в ./dist
 tar -xzf dist/harness-control-<версия>-<коммит>.tar.gz

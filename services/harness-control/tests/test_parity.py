@@ -95,6 +95,15 @@ class Parity(HarnessCase):
         self.assertEqual(cli_text, mcp_text)
         self.assertEqual(json.loads(cli_text)['error'], 'bad_request')
 
+    def test_административные_и_неизвестные_глаголы_отказ_одинаков(self):
+        for verb in ('adopt-baseline', 'recover', 'run-op', 'rm'):
+            with self.subTest(verb=verb):
+                code, cli_text = self.a.cli([verb, 'harness-canary'])
+                is_error, mcp_text = self.b.mcp(verb, {'component': 'harness-canary'})
+                self.assertEqual((code, is_error), (2, True))
+                self.assertEqual(cli_text, mcp_text)
+                self.assertEqual(json.loads(cli_text)['error'], 'verb_not_allowed')
+
     def test_таблица_глаголов_покрыта_инструментами_mcp(self):
         self.assertEqual([t['name'] for t in mcp.TOOLS], [f'harness_{v}' for v in COMMANDS])
         for tool in mcp.TOOLS:

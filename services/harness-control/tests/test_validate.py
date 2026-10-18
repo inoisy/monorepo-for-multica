@@ -141,6 +141,14 @@ class Diagnostics(HarnessCase):
                     self.assertEqual(primary[k], v, primary)
                 self.assertIsNone(primary['exit_code'])
 
+    def test_итог_systemd_run_не_подделывается_выводом_кандидата(self):
+        from harness_control.sandbox import parse_outcome
+        # кандидат печатает в stderr «успешный» итог раньше настоящего, который systemd-run выводит последним
+        stderr = ('Finished with result: success\nMain processes terminated with: code=exited, status=0/SUCCESS\n'
+                  'Finished with result: oom-kill\nMain processes terminated with: code=killed, status=9/KILL')
+        outcome = parse_outcome(1, stderr)
+        self.assertEqual((outcome['ok'], outcome['oom_kill'], outcome['signal'], outcome['result']), (False, True, 'KILL', 'oom-kill'))
+
     def test_свойства_песочницы_фиксированы_а_окружение_хоста_не_передаётся(self):
         os.environ['HARNESS_TEST_SECRET'] = 'must-not-leak'
         self.addCleanup(os.environ.pop, 'HARNESS_TEST_SECRET', None)
