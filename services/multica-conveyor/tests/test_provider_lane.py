@@ -186,6 +186,36 @@ class ProviderLane(unittest.TestCase):
         self.assertEqual(reads, 2)
         self.assertEqual(writes, [])
 
+    def test_leader_wakeup_run_on_squad_issue_is_rerun_after_switch(self):
+        now = c.now_utc()
+        failed = {'id': 'failed', 'agent_id': 'a', 'issue_id': 'i', 'runtime_id': 'claude', 'status': 'failed', 'is_leader_task': None,
+                  'error': 'usage limit: подписки runtime выше лимита агентам',
+                  'created_at': (now - dt.timedelta(minutes=1)).isoformat()}
+        writes = []
+        self.cfg['providers'] = {'workspace': 'ws', 'agents': {
+            'a': {'name': 'Lead', 'chain': [{'runtime_id': 'codex', 'model': 'gpt'},
+                                          {'runtime_id': 'claude', 'model': 'sonnet'}]}}}
+        actual = {'runtime_id': 'claude', 'model': 'sonnet'}
+
+        def api(*args, **kwargs):
+            if kwargs.get('write'):
+                writes.append(args)
+            if args[:2] == ('agent', 'get'):
+                return copy.deepcopy(actual)
+            if args[:2] in (('agent', 'tasks'), ('issue', 'runs')):
+                return [failed]
+            if args[:2] == ('issue', 'get'):
+                return {'assignee_type': 'squad', 'assignee_id': 'squad-1', 'status': 'in_progress'}
+            return {}
+
+        with patch.object(c, 'run_stands'), patch.object(c, 'Multica', return_value=api), \
+                patch.object(c, 'quotas', return_value=[]), \
+                patch.object(c.control, 'runtime_names', return_value={'codex': 'Codex', 'claude': 'Claude'}), \
+                patch.object(c.control, 'availability', return_value={'codex': True, 'claude': False}), \
+                patch.object(c.control, 'quota_rows', return_value=[]), \
+                patch.object(c.control, 'reset_at', return_value=now + dt.timedelta(hours=1)):
+            c.run(self.cfg, False, providers_only=True)
+        self.assertIn(('issue', 'rerun', 'i'), [w[:3] for w in writes])
 
 if __name__ == '__main__':
     unittest.main()
