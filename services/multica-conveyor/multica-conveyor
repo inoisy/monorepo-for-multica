@@ -393,6 +393,7 @@ class Watch:
     def __init__(self, dry):
         self.dry = dry
         self.target_key = None
+        self.publish_early = None  # колбэк _run: опубликовать строку эпика до долгой приёмки
         self.state = json.loads(STATE.read_text()) if STATE.exists() else {}
         self.saved = copy.deepcopy(self.state)
 
@@ -485,6 +486,22 @@ def accept_issue(m, repo, epic, issue, w):
     return True
 
 
+def epic_entry(epic, stages, unstaged, stage, frozen, snap_issues):
+    """Строка эпика для снимка страницы; джобы задач заполняет вызывающий в snap_issues."""
+    return {'key': epic['key'], 'name': epic.get('name', epic['key']), 'stage': stage,
+            'kind': epic.get('kind', 'epic'), 'paused': frozen,
+            'stages': [{'stage': st['stage'], 'issues': [
+                snap_issues.setdefault(i['identifier'], {
+                    'key': i['identifier'], 'title': i.get('title', ''), 'status': status(i),
+                    'assigned': bool(i.get('assignee_id')), 'held': HOLD in (i.get('description') or ''),
+                    'unmerged': i.get('unmerged') or [], 'jobs': []}) for i in st['issues']]}
+                for st in sorted(stages, key=lambda s: s['stage'])],
+            # Подзадачи без этапа сторож не назначает, но на странице они видны.
+            'unstaged': [{'key': i['identifier'], 'title': i.get('title', ''), 'status': status(i),
+                          'assigned': bool(i.get('assignee_id')), 'held': False, 'unmerged': [],
+                          'jobs': []} for i in unstaged]}
+
+
 def run_epic(epic, w, snapshot, frozen=False):
     """frozen — цель на паузе: только читаем для снимка, ничего не назначаем, не повторяем и не сливаем."""
     m = Multica(epic['workspace'], w.dry, w.permit)
@@ -502,7 +519,11 @@ def run_epic(epic, w, snapshot, frozen=False):
             comments = items(m('issue', 'comment', 'list', issue['identifier']), 'comments')
             return sorted({b for c in comments if c.get('author_type') == 'agent' for b in BRANCH.findall(c.get('content') or '')})
         mark_unmerged(stages, branches_of, repo.merged)
-        for issue in [] if frozen else decide(stages)[1]:
+        to_accept = [] if frozen else decide(stages)[1]
+        if to_accept and w.publish_early:
+            # Приёмка идёт до получаса, а снимок публикуется после прохода: без этого страница отстаёт на всё это время.
+            w.publish_early(epic_entry(epic, stages, unstaged, decide(stages)[0], frozen, {}))
+        for issue in to_accept:
             accept_issue(m, repo, epic, issue, w)
     stage, _, to_assign, held = decide(stages)
     to_assign = to_assign[:epic.get('max_per_tick', 4)]
@@ -515,18 +536,7 @@ def run_epic(epic, w, snapshot, frozen=False):
         w.log('level', f"{epic['key']}: агент {agent_id[:8]} → уровень {level}")
         m('agent', 'update', agent_id, '--thinking-level', level, write=True)
     snap_issues = {}
-    snapshot['epics'].append({'key': epic['key'], 'name': epic.get('name', epic['key']), 'stage': stage,
-                              'kind': epic.get('kind', 'epic'), 'paused': frozen,
-                              'stages': [{'stage': st['stage'], 'issues': [
-                                  snap_issues.setdefault(i['identifier'], {
-                                      'key': i['identifier'], 'title': i.get('title', ''), 'status': status(i),
-                                      'assigned': bool(i.get('assignee_id')), 'held': HOLD in (i.get('description') or ''),
-                                      'unmerged': i.get('unmerged') or [], 'jobs': []}) for i in st['issues']]}
-                                  for st in sorted(stages, key=lambda s: s['stage'])],
-                              # Подзадачи без этапа сторож не назначает, но на странице они видны.
-                              'unstaged': [{'key': i['identifier'], 'title': i.get('title', ''), 'status': status(i),
-                                            'assigned': bool(i.get('assignee_id')), 'held': False, 'unmerged': [],
-                                            'jobs': []} for i in unstaged]})
+    snapshot['epics'].append(epic_entry(epic, stages, unstaged, stage, frozen, snap_issues))
     if stage is None:
         return
     for issue in held:
@@ -1068,6 +1078,25 @@ def run(cfg, dry, providers_only=False):
         _run(cfg, dry, providers_only)
 
 
+def publish_epic_early(cfg, entry, snapshot, events):
+    """Обновить на странице одну строку эпика, не дожидаясь конца прохода; остальное — из прошлого снимка."""
+    d = cfg.get('status_dir')
+    if not d:
+        return
+    stored = Path(d, 'status.json')
+    base = json.loads(stored.read_text()) if stored.exists() else {**snapshot, 'epics': []}
+    old = next((e for e in base.get('epics', []) if e['key'] == entry['key']), None)
+    if old:  # джобы (раны задач) считает полный проход — не теряем их на странице
+        jobs = {i['key']: i['jobs'] for st in old.get('stages', []) for i in st['issues']}
+        for st in entry['stages']:
+            for i in st['issues']:
+                i['jobs'] = jobs.get(i['key'], i['jobs'])
+    epics = [entry if e['key'] == entry['key'] else e for e in base.get('epics', [])]
+    if old is None:
+        epics.append(entry)
+    write_status(cfg, {**base, 'epics': epics, 'tick': snapshot['tick']}, events)
+
+
 def _run(cfg, dry, providers_only):
     w = Watch(dry)
     with control.Store().locked() as settings:
@@ -1077,6 +1106,8 @@ def _run(cfg, dry, providers_only):
     snapshot = {'tick': now_utc().isoformat(timespec='seconds')[:19].replace('T', ' '), 'epics': [], 'agents': [], 'errors': [],
                 'paused': paused, 'stands': [], 'agent_names': {**cfg.get('agent_names', {}),
                   **{aid: a['name'] for aid, a in chains.items()}}}
+    if not dry and not providers_only:
+        w.publish_early = lambda entry: publish_epic_early(cfg, entry, snapshot, w.state.get('_events', []))
     # Цель на паузе (или весь конвейер) всё равно читается — пульт рисует по снимку доску.
     steps = [] if providers_only else [(epic['key'], epic['key'], paused or epic.get('paused', False),
               lambda epic=epic, frozen=paused or epic.get('paused', False): run_epic(epic, w, snapshot, frozen=frozen))

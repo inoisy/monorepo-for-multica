@@ -281,6 +281,37 @@ class MetaExecution(unittest.TestCase):
                 stands.assert_not_called()
             self.assertTrue(json.loads(Path(tmp, 'status.json').read_text())['paused'])
 
+    def test_строка_эпика_публикуется_до_долгой_приёмки(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            controls = str(Path(tmp) / 'controls.json')
+            Path(controls).write_text('{}')
+            status = Path(tmp, 'status.json')
+            status.write_text(json.dumps({'tick': 'old', 'epics': [], 'agents': [], 'quotas': [], 'errors': []}))
+            cfg = {'epics': [{'key': 'TASK-1', 'workspace': 'ws', 'repo': '/r'}], 'status_dir': tmp}
+            seen = {}
+            issue = {'identifier': 'TASK-2', 'title': 'готова к приёмке', 'status': 'in_review', 'assignee_id': 'a', 'unmerged': ['b']}
+
+            def api(*args, **kwargs):
+                if args[:2] == ('issue', 'children'):
+                    return {'stages': [{'stage': 1, 'issues': [issue]}],
+                            'unstaged': [{'identifier': 'TASK-3', 'title': 'новая', 'status': 'todo'}]}
+                return {}
+
+            def accept(*args, **kwargs):
+                # Приёмка идёт — страница уже показывает свежие задачи эпика.
+                page = json.loads(status.read_text())
+                seen['keys'] = [i['key'] for e in page['epics'] for st in e['stages'] for i in st['issues']] + \
+                               [i['key'] for e in page['epics'] for i in e['unstaged']]
+                return False
+
+            with patch.dict(os.environ, {'MULTICA_CONTROL_STATE': controls}), \
+                    patch.object(c, 'STATE', Path(tmp) / 'state.json'), patch.object(c, 'Multica', return_value=api), \
+                    patch.object(c, 'Repo'), patch.object(c, 'mark_unmerged'), patch.object(c, 'accept_issue', side_effect=accept), \
+                    patch.object(c, 'run_providers'), patch.object(c, 'run_stands'), patch.object(c, 'quotas', return_value=[]):
+                c.run(cfg, False)
+            self.assertEqual(sorted(seen['keys']), ['TASK-2', 'TASK-3'])
+
     def test_пауза_цели_морозит_только_её(self):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
