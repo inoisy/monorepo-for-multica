@@ -210,6 +210,27 @@ def export_subscriptions(cfg, settings):
     return path
 
 
+def accounts(subs):
+    """Подписки, сгруппированные по аккаунту: у ключей одного аккаунта (claude-main и claude-max) общая строка
+    дашборда — загрузка и лимиты у них одни. Без строки дашборда подписка — сама себе аккаунт. Порядок — по таблице."""
+    groups = {}
+    for sub in subs:
+        groups.setdefault((sub.get('provider'), sub.get('quota_row')) if sub.get('quota_row') else sub['id'], []).append(sub)
+    return list(groups.values())
+
+
+def account_card(group):
+    """Одна карточка на аккаунт: первая подписка — главная (её id, название, резерв), окна и runtime — общие."""
+    main = group[0]
+    windows = list(dict.fromkeys(w for s in group for w in s['windows']))
+    caps = {k: next(s['caps'][k] for s in group if k in s['caps']) for k in windows}
+    card = {**main, 'windows': windows, 'caps': caps, 'effective': effective_caps(caps, main['reserve'], windows),
+            'keys': [s['id'] for s in group]}
+    if len(group) > 1:
+        card['credential'] = ' · '.join(s['credential'] for s in group if s.get('credential'))
+    return card
+
+
 def caps_by_row(subs):
     """Строка дашборда может стоять за несколькими подписками (claude-main и claude-max) — берём меньший лимит."""
     rows = {}
