@@ -1,7 +1,9 @@
 #!/usr/bin/python3 -I
 """Единый сторож multica: конвейер эпиков, смена провайдера на лимите, страница статуса. Без человека.
 
-Конфиг — /etc/multica-conveyor.json, таймер раз в 2 минуты от пользователя agents.
+Конфиг — /etc/multica-conveyor.json. Приёмка: multica-conveyor.timer раз в 2 минуты.
+Провайдеры: multica-provider.timer раз в минуту, --providers-only, независимо от приёмки.
+Оба запуска от agents, у каждого свой run-lock; state.json сливается атомарно под коротким lock.
 
 Конвейер — для каждого эпика из `epics`:
 1. Приёмка. Задача активной стадии в `in_review` (или в «Готово», но не влитая) с веткой `t-<номер>-<слаг>`
@@ -29,13 +31,13 @@ multica не выдаст — сторож их снимает и перезап
 загрузка подписок, журнал действий). Комментарии в задачи пишет только при провале приёмки.
 `--dry-run` печатает решения, ничего не меняет и страницу не пишет.
 """
-import datetime as dt, html, json, os, re, shutil, subprocess, sys, tempfile, traceback, urllib.error, urllib.request
+import contextlib, copy, datetime as dt, fcntl, html, json, os, re, shutil, subprocess, sys, tempfile, traceback, urllib.error, urllib.request
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import control_state as control
 
 CONFIG = Path(os.environ.get('MULTICA_CONVEYOR_CONFIG', '/etc/multica-conveyor.json'))
-STATE = Path.home() / '.local/state/multica-conveyor/state.json'
+STATE = Path(os.environ.get('MULTICA_CONVEYOR_STATE', Path.home() / '.local/state/multica-conveyor/state.json'))
 CANCELLED = {'cancelled', 'canceled'}
 HOLD = '**Ждёт:**'
 BRANCH = re.compile(r'\bt-\d+-[a-z0-9][a-z0-9-]*[a-z0-9]\b')
@@ -286,26 +288,39 @@ class Watch:
     def __init__(self, dry):
         self.dry = dry
         self.target_key = None
-        try:
-            self.state = json.loads(STATE.read_text())
-        except (OSError, ValueError):
-            self.state = {}
+        self.state = json.loads(STATE.read_text()) if STATE.exists() else {}
+        self.saved = copy.deepcopy(self.state)
 
-    def permit(self):
-        with control.Store().locked() as settings:
-            if settings.get('paused'):
-                raise AutomationPaused('Конвейер на паузе')
-            target = settings.get('targets', {}).get(self.target_key, {}) if self.target_key else {}
-            if not target.get('enabled', True) or target.get('removed'):
-                raise AutomationPaused(self.target_key + ' исключена из конвейера')
-            if target.get('paused'):
-                raise AutomationPaused(self.target_key + ' на паузе')
+    def permit(self, settings=None):
+        if settings is None:
+            with control.Store().locked() as current:
+                return self.permit(current)
+        if settings.get('paused'):
+            raise AutomationPaused('Конвейер на паузе')
+        target = settings.get('targets', {}).get(self.target_key, {}) if self.target_key else {}
+        if not target.get('enabled', True) or target.get('removed'):
+            raise AutomationPaused(self.target_key + ' исключена из конвейера')
+        if target.get('paused'):
+            raise AutomationPaused(self.target_key + ' на паузе')
 
     def save(self):
         if self.dry:
             return
-        STATE.parent.mkdir(parents=True, exist_ok=True)
-        STATE.write_text(json.dumps(self.state, ensure_ascii=False, indent=1))
+        # Each lane owns its keys; acceptance must not overwrite a newer provider pass.
+        with control.Store(STATE).locked() as current:
+            for key in self.saved.keys() | self.state.keys():
+                if key == '_events':
+                    continue
+                if key not in self.state:
+                    current.pop(key, None)
+                elif key not in self.saved or self.state[key] != self.saved[key]:
+                    current[key] = copy.deepcopy(self.state[key])
+            previous_events = self.saved.get('_events', [])
+            added = [e for e in self.state.get('_events', []) if e not in previous_events]
+            if added:
+                current['_events'] = sorted(current.get('_events', []) + added, key=lambda e: e['t'])[-EVENTS_KEEP:]
+            self.state = copy.deepcopy(current)
+        self.saved = copy.deepcopy(self.state)
 
     def log(self, kind, text):
         print(text)
@@ -416,10 +431,19 @@ def run_epic(epic, w, snapshot, frozen=False):
         if frozen or closed(issue) or issue.get('unmerged'):
             continue
         if quota_retry_due(runs, now, retries.get(key), epic.get('quota_retry_minutes', 20)):
-            w.log('retry', f"{epic['key']}: {key} упала на лимите провайдера — повтор")
-            m('issue', 'rerun', key, write=True)
-            if not w.dry:
-                retries[key] = now.isoformat()
+            # The provider lane uses this same lock for read/check/rerun.
+            with control.Store().locked() as settings:
+                w.permit(settings)
+                locked_m = Multica(epic['workspace'], w.dry, lambda: w.permit(settings))
+                fresh = locked_m('issue', 'get', key)
+                fresh = fresh.get('issue', fresh)
+                runs = items(locked_m('issue', 'runs', key), 'runs')
+                if not closed(fresh) and status(fresh) != 'in_review' and quota_retry_due(
+                        runs, now, retries.get(key), epic.get('quota_retry_minutes', 20)):
+                    w.log('retry', f"{epic['key']}: {key} упала на лимите провайдера — повтор")
+                    locked_m('issue', 'rerun', key, write=True)
+                    if not w.dry:
+                        retries[key] = now.isoformat()
     for issue in [] if frozen else to_assign:
         w.log('assign', f"{epic['key']}: стадия {stage}, {issue['identifier']} → сквад")
         if status(issue) in ('backlog', None):
@@ -783,7 +807,7 @@ def render(snapshot, events):
         'code{font-size:12px}')
     parts = [f"<div class='head'><h1>Сторож multica</h1><span class='muted'>тик {e(snapshot['tick'])} UTC · страница "
              f"обновляется каждую минуту, сторож — каждые 2</span></div>"]
-    for err in snapshot.get('errors', []):
+    for err in snapshot.get('errors', []) + snapshot.get('provider_errors', []):
         parts.append(f"<div class='card k-error'><b>Ошибка тика:</b><pre>{e(err)}</pre></div>")
     last_event = {}
     for ev in events:
@@ -850,20 +874,56 @@ def render(snapshot, events):
             f"<title>Сторож multica</title><style>{css}</style></head><body><main>{''.join(parts)}</main></body></html>")
 
 
-def write_status(cfg, snapshot, events):
+def write_status(cfg, snapshot, events, providers_only=False):
     d = cfg.get('status_dir')
     if not d:
         return
     Path(d).mkdir(parents=True, exist_ok=True)
-    for name, body in (('index.html', render(snapshot, events)),
-                       ('status.json', json.dumps({**snapshot, 'events': events[-150:]}, ensure_ascii=False, indent=1))):
-        tmp = Path(d, name + '.tmp')
-        tmp.write_text(body)
-        os.chmod(tmp, 0o644)
-        tmp.replace(Path(d, name))
+    with Path(d, '.publish.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if providers_only and Path(d, 'status.json').exists():
+            snapshot = json.loads(Path(d, 'status.json').read_text())
+        provider_status = STATE.with_name('providers-status.json')
+        if provider_status.exists():
+            p = json.loads(provider_status.read_text())
+            snapshot = {**snapshot, 'agents': p['agents'], 'provider_tick': p['tick'],
+                        'provider_errors': p['errors']}
+        # A publisher may have waited while the other lane saved newer events.
+        if STATE.exists():
+            events = json.loads(STATE.read_text()).get('_events', [])
+        for name, body in (('index.html', render(snapshot, events)),
+                           ('status.json', json.dumps({**snapshot, 'events': events[-150:]}, ensure_ascii=False, indent=1))):
+            tmp = Path(d, name + '.tmp')
+            tmp.write_text(body)
+            os.chmod(tmp, 0o644)
+            tmp.replace(Path(d, name))
 
 
-def run(cfg, dry):
+@contextlib.contextmanager
+def lane_lock(providers_only):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    name = 'providers.run.lock' if providers_only else 'epics.run.lock'
+    with STATE.with_name(name).open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def run(cfg, dry, providers_only=False):
+    with lane_lock(providers_only) as acquired:
+        if not acquired:
+            print('Этот проход сторожа уже работает; пропускаем повторный запуск')
+            return
+        _run(cfg, dry, providers_only)
+
+
+def _run(cfg, dry, providers_only):
     w = Watch(dry)
     with control.Store().locked() as settings:
         selected = [t for t in control.targets(cfg, settings) if t.get('enabled', True)]
@@ -873,10 +933,10 @@ def run(cfg, dry):
                 'paused': paused, 'stands': [], 'agent_names': {**cfg.get('agent_names', {}),
                   **{aid: a['name'] for aid, a in chains.items()}}}
     # Цель на паузе (или весь конвейер) всё равно читается — пульт рисует по снимку доску.
-    steps = [(epic['key'], epic['key'], paused or epic.get('paused', False),
+    steps = [] if providers_only else [(epic['key'], epic['key'], paused or epic.get('paused', False),
               lambda epic=epic, frozen=paused or epic.get('paused', False): run_epic(epic, w, snapshot, frozen=frozen))
              for epic in selected]
-    steps += [('провайдеры', None, False, lambda: run_providers(cfg, w, snapshot)),
+    steps += [('провайдеры', None, False, lambda: run_providers(cfg, w, snapshot))] if providers_only else [
               ('стенды', None, False, lambda: run_stands(cfg, w, snapshot))]
     workspaces = {t['key']: t.get('workspace') for t in selected}
     for step, target_key, frozen, fn in steps:
@@ -895,8 +955,13 @@ def run(cfg, dry):
         w.save()
     snapshot['quotas'] = quotas(cfg)
     if not dry:
-        write_status(cfg, snapshot, w.state.get('_events', []))
+        w.save()
+        if providers_only:
+            provider_status = STATE.with_name('providers-status.json')
+            with control.Store(provider_status).locked() as current:
+                current.update({k: snapshot[k] for k in ('tick', 'agents', 'errors')})
+        write_status(cfg, snapshot, w.state.get('_events', []), providers_only)
 
 
 if __name__ == '__main__':
-    run(json.loads(CONFIG.read_text()), '--dry-run' in sys.argv)
+    run(json.loads(CONFIG.read_text()), '--dry-run' in sys.argv, '--providers-only' in sys.argv)
