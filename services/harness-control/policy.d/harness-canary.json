@@ -1,0 +1,36 @@
+{
+  "component": "harness-canary",
+  "description": "Тестовый компонент: проверка пути validate → deploy → health → rollback без риска для конвейера",
+  "source": {
+    "repo": "https://github.com/inoisy/monorepo-for-multica.git",
+    "path": "services/harness-control/canary",
+    "require_ref": null
+  },
+  "targets": [
+    {"src": "canary.py", "dst": "/usr/local/lib/harness-canary/canary.py", "mode": "0755"},
+    {"src": "VERSION", "dst": "/usr/local/lib/harness-canary/VERSION", "mode": "0644"}
+  ],
+  "timers": ["harness-canary.timer"],
+  "busy_units": ["harness-canary.service"],
+  "required_units": ["harness-canary.service", "harness-canary.timer"],
+  "baseline_capabilities": {"lanes": []},
+  "validate": {
+    "checks": [
+      {"name": "canary-smoke", "argv": ["/usr/bin/python3", "-I", "{checks}/canary_smoke.py", "{work}"]}
+    ],
+    "tests": {
+      "argv": ["/usr/bin/python3", "-I", "-m", "unittest", "discover", "-s", "tests", "-q"],
+      "count_regex": "Ran (\\d+) tests?",
+      "min": 1
+    }
+  },
+  "sandbox": {"memory_max": "512M", "tasks_max": 64, "runtime_max_sec": 300, "path": "/usr/local/bin:/usr/bin:/bin"},
+  "health": {
+    "timeout": 300,
+    "poll": 5,
+    "units": [{"unit": "harness-canary.service", "timer": "harness-canary.timer"}],
+    "status_files": [
+      {"path": "/var/lib/harness-canary/status.json", "tick_key": "tick", "errors_key": "errors"}
+    ]
+  }
+}

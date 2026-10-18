@@ -1,0 +1,7 @@
+{
+  "_quota_retry": {"TASK-1": "2026-10-17T10:00:00+00:00"},
+  "_providers": {"00000000-0000-0000-0000-000000000001": {"profile": 0, "since": "2026-10-17T10:00:00+00:00"}},
+  "_events": [{"t": "2026-10-17T10:00:00+00:00", "kind": "provider", "text": "fixture", "ws": null}],
+  "_stands": {},
+  "TASK-1": {"t-1-fixture": "abc+def"}
+}
