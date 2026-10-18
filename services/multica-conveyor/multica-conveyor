@@ -705,8 +705,8 @@ def rerun_quota_failed(m, w, a, runs, agent_id, now=None, after=None):
     """Перезапустить задачи, где ран этого агента упал на лимите, пока задача ещё его. `issue rerun` будит текущего
     исполнителя, поэтому задача, ушедшая вперёд (у другого, на сдаче, закрыта), не трогается. Своя — назначена агенту:
     тогда последний ран агента в ней — отказ, а чужие раны после него не мешают (лидер мог отработать после падения
-    исполнителя и встать ждать сброса); или назначена скваду, а отказ — ран лидера: тогда отказ — последний ран задачи
-    вообще. Отказ не раньше `after` (по умолчанию сутки назад), по задаче ничего не идёт."""
+    исполнителя и встать ждать сброса); или назначена скваду, а отказ — ран агента (лидера; ран от будильника не помечен
+    `is_leader_task`): тогда отказ — последний ран задачи вообще. Отказ не раньше `after` (по умолчанию сутки назад), по задаче ничего не идёт."""
     after = after or (now or now_utc()) - dt.timedelta(hours=24)
     failed = {}
     for r in sorted(runs, key=lambda r: r.get('created_at') or ''):
@@ -724,8 +724,7 @@ def rerun_quota_failed(m, w, a, runs, agent_id, now=None, after=None):
         if status(issue) == 'in_review' or is_done(issue) or is_cancelled(issue):
             continue
         mine = issue.get('assignee_type') in ('agent', None) and issue.get('assignee_id') == agent_id
-        squad = issue.get('assignee_type') == 'squad' and run.get('is_leader_task') \
-            and latest(issue_runs).get('id') == latest(own).get('id')
+        squad = issue.get('assignee_type') == 'squad' and latest(issue_runs).get('id') == latest(own).get('id')
         if mine or squad:
             w.log('retry', f"{a['name']}: перезапуск задачи {issue.get('identifier') or issue_id[:8]} после лимита")
             m('issue', 'rerun', issue_id, write=True)
