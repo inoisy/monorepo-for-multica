@@ -312,6 +312,19 @@ class MetaExecution(unittest.TestCase):
                 c.run(cfg, False)
             self.assertEqual(sorted(seen['keys']), ['TASK-2', 'TASK-3'])
 
+    def test_ветки_задачи_берутся_из_последнего_отчёта_а_не_из_упоминаний(self):
+        def comment(at, text, who='agent'):
+            return {'created_at': at, 'author_type': who, 'content': text}
+        comments = [
+            comment('16:04', 'Ветка `t-12345-assignments-list`. Не трогает `t-12345-header-kpi` и t-12345-qa-fixture-f0'),
+            comment('18:44', 'Итог: прошло, ветка `t-12345-assignments-list`, коммит 947e7d1'),
+            comment('19:36', 'Автоприёмка упала: ветка `t-12345-header-kpi`, таймаут'),
+            comment('19:40', 'ветка `t-12345-other`', who='member'),
+        ]
+        self.assertEqual(c.report_branches(comments), ['t-12345-assignments-list'])
+        # Без «ветка `…`» работает прежнее правило — любые упоминания агентов.
+        self.assertEqual(c.report_branches([comment('1', 'сдано в t-5-fix-a и t-5-fix-b')]), ['t-5-fix-a', 't-5-fix-b'])
+
     def test_пауза_цели_морозит_только_её(self):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
