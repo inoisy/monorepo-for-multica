@@ -84,9 +84,15 @@ class Parity(HarnessCase):
         code, cli_text = self.a.cli(['op', op_a])
         is_error, mcp_text = self.b.mcp('op', {'id': op_b})
         self.assertEqual(self.norm(cli_text), self.norm(mcp_text))
+        self.assertIsNone(json.loads(cli_text)['error'])
+        self.assertEqual((code, is_error), (0, False))
         code, cli_text = self.a.cli(['log', op_a, '--tail', '5'])
         is_error, mcp_text = self.b.mcp('log', {'id': op_b, 'tail': 5})
         self.assertEqual(self.norm(cli_text), self.norm(mcp_text))
+
+    def test_op_несуществующей_операции_ошибка_в_обоих_адаптерах(self):
+        a, _ = self.both(['op', '0000000000000-deadbeef'])
+        self.assertEqual(a['error'], 'operation_not_found')
 
     def test_ошибки_разбора_одинаковы(self):
         code, cli_text = self.a.cli(['validate', 'harness-canary', 'XYZ'])
@@ -111,6 +117,20 @@ class Parity(HarnessCase):
 
 
 class McpProtocol(unittest.TestCase):
+    def test_ответ_с_error_null_и_фактической_ошибкой(self):
+        for error in (None, 'operation_not_found'):
+            with self.subTest(error=error):
+                payload = {'error': error, 'status': 'done' if error is None else 'failed'}
+                call = lambda verb, tokens: payload
+                out = io.StringIO()
+                code = cli.main(['op', '0000000000000-deadbeef'], call=call, out=out)
+                mcp_out = io.StringIO()
+                mcp.handle({'id': 1, 'method': 'tools/call', 'params': {
+                    'name': 'harness_op', 'arguments': {'id': '0000000000000-deadbeef'}}}, mcp_out, call=call)
+                result = json.loads(mcp_out.getvalue())['result']
+                self.assertEqual(json.loads(out.getvalue()), json.loads(result['content'][0]['text']))
+                self.assertEqual((code, result['isError']), (1, True) if error else (0, False))
+
     def run_lines(self, *messages):
         out = io.StringIO()
         mcp.main(io.StringIO('\n'.join(m if isinstance(m, str) else json.dumps(m) for m in messages) + '\n'), out,
@@ -135,6 +155,15 @@ class McpProtocol(unittest.TestCase):
 
 
 class PrivEntryPoint(HarnessCase):
+    def test_код_выхода_op_зависит_от_ошибки_а_не_наличия_ключа(self):
+        for error in (None, {'error': 'internal', 'reason': 'failed'}):
+            with self.subTest(error=error), mock.patch.object(priv, 'Harness') as harness:
+                harness.return_value.handle.return_value = {'error': error}
+                out = io.StringIO()
+                code = priv.main(['op', '0000000000000-deadbeef'], out=out)
+                self.assertEqual(json.loads(out.getvalue()), {'error': error})
+                self.assertEqual(code, 1 if error else 0)
+
     def _run(self, *argv, **env):
         return subprocess.run([str(PKG / 'bin' / 'harness-priv'), *argv], capture_output=True, text=True, timeout=60,
                               env={'HARNESS_ROOT': str(self.root), 'PATH': '/usr/bin:/bin', **env})

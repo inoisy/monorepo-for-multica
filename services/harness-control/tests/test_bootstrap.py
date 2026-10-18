@@ -79,13 +79,15 @@ class CheckMode(unittest.TestCase):
         if os.geteuid() == 0:
             self.skipTest('проверка рассчитана на запуск без root')
         before = tree_state(PKG.parent)
+        installed = Path('/usr/local/lib/harness-control')
+        installed_before = tree_state(installed) if installed.exists() else None
         r = check_output()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertRegex(r.stdout, r'SHA256 пакета: [0-9a-f]{64}')
         self.assertIn('план:', r.stdout)
         self.assertIn('/etc/sudoers.d/harness-control', r.stdout)
         self.assertEqual(tree_state(PKG.parent), before)
-        self.assertFalse(Path('/usr/local/lib/harness-control').exists())
+        self.assertEqual(tree_state(installed) if installed.exists() else None, installed_before)
 
     def test_sha_стабилен(self):
         sha = lambda: re.search(r'SHA256 пакета: (\w+)', check_output().stdout).group(1)

@@ -23,4 +23,4 @@ def main(argv, call=client.call, out=sys.stdout):
         return 2
     result = call(verb, tokens)
     out.write(client.dumps(result) + '\n')
-    return 1 if 'error' in result else 0
+    return 1 if client.is_error(result) else 0
