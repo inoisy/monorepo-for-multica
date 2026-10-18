@@ -45,8 +45,10 @@ class AcceptLog(unittest.TestCase):
 
     def test_полный_лог_пишется_и_токены_скрыты(self):
         cmds = ['echo "шаг один"', 'echo token=ghp_abcdefghijklmnopqrstuv; echo "$CONFIG_VALUE"; seq 1 500; false']
-        ok, why, tail = self.r.accept('t-1-x', cmds, 60, key='TASK-1', env={'CONFIG_VALUE': 'hunter2-value'})
-        self.assertFalse(ok)
+        res = self.r.accept('t-1-x', cmds, 60, key='TASK-1', env={'CONFIG_VALUE': 'hunter2-value'})
+        tail = res['tail']
+        self.assertEqual((res['status'], res['code']), ('failed', 1))
+        self.assertEqual(res['log'], str(self.log_file()))
         log = self.log_file().read_text()
         self.assertIn('шаг один', log)
         self.assertIn('\n1\n', log)  # лог полный, а не хвост
@@ -58,8 +60,7 @@ class AcceptLog(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.log_file().stat().st_mode), 0o600)
 
     def test_зелёная_приёмка_тоже_оставляет_лог(self):
-        ok, _, _ = self.r.accept('t-1-x', ['echo зелёно-по-логу'], 60, key='TASK-1')
-        self.assertTrue(ok)
+        self.assertEqual(self.r.accept('t-1-x', ['echo зелёно-по-логу'], 60, key='TASK-1')['status'], 'passed')
         self.assertIn('зелёно-по-логу', self.log_file().read_text())
 
     def test_path_и_env_берутся_из_конфига(self):
@@ -69,25 +70,25 @@ class AcceptLog(unittest.TestCase):
         tool.write_text('#!/bin/sh\necho tool-ok\n')
         tool.chmod(0o755)
         path = f'{tools}:/usr/bin:/bin'
-        ok, why, _ = self.r.accept('t-1-x', ['only-here', 'test "$MARKER" = on', 'test "$PATH" = "' + path + '"'], 60,
-                                   key='TASK-1', path=path, env={'MARKER': 'on'})
-        self.assertTrue(ok, why)
+        res = self.r.accept('t-1-x', ['only-here', 'test "$MARKER" = on', 'test "$PATH" = "' + path + '"'], 60,
+                            key='TASK-1', path=path, env={'MARKER': 'on'})
+        self.assertEqual(res['status'], 'passed', res['reason'])
         header = self.log_file().read_text().splitlines()[0]
         self.assertIn(path, header)
         self.assertIn("'MARKER'", header)
         self.assertNotIn('=on', header)
-        ok, why, _ = self.r.accept('t-1-x', ['only-here'], 60, key='TASK-1', path='/usr/bin:/bin')
-        self.assertFalse(ok)
-        self.assertIn('`only-here`', why)
+        res = self.r.accept('t-1-x', ['only-here'], 60, key='TASK-1', path='/usr/bin:/bin')
+        self.assertEqual(res['status'], 'failed')
+        self.assertIn('`only-here`', res['reason'])
 
     def test_таймаут_убивает_всю_группу_процессов(self):
         pidfile = self.tmp / 'child.pid'
         cmd = f'sh -c \'trap "" TERM; echo $$ > {pidfile}; sleep 300\' & wait'
         with patch.object(c, 'KILL_GRACE', 1):
             started = time.monotonic()
-            ok, why, _ = self.r.accept('t-1-x', [cmd], 2, key='TASK-1')
-        self.assertFalse(ok)
-        self.assertIn('таймаут 2 с', why)
+            res = self.r.accept('t-1-x', [cmd], 2, key='TASK-1')
+        self.assertEqual(res['status'], 'failed')
+        self.assertIn('таймаут 2 с', res['reason'])
         self.assertLess(time.monotonic() - started, 30)
         pid = int(pidfile.read_text())
         for _ in range(50):

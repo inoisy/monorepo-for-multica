@@ -7,23 +7,30 @@
 --capabilities печатает JSON с полосами и функциями этого файла (без конфига) — по нему выкатчик решает, включать ли таймеры.
 
 Конвейер — для каждого эпика из `epics`:
-1. Приёмка. Задача активной стадии в `in_review` (или в «Готово», но не влитая) с веткой `t-<номер>-<слаг>`
-   в комментариях агентов: свежий клон ветки, поверх — свежий `base`, проверка диффа и команды `acceptance`.
-   Зелёно — ветка вливается в `base` (`--no-ff`, хвост сообщения `commit_ref`), задача уходит в «Готово».
+1. Приёмка. Любая подзадача эпика (с этапом или без) в `in_review` или в «Готово», чей коммит ещё не в `base`.
+   Что принимать — только из метаданных задачи `branch` и `commit` (полный SHA): ветка должна указывать ровно на
+   этот коммит, иначе приёмки нет, а причина видна в журнале и на странице. Проверка — отдельная задача atd
+   (`--accept-job`), тик её не ждёт: клон этого коммита, поверх — зафиксированный коммит `base`, проверка диффа и
+   команды `acceptance`. Одна пара коммитов — одна задача: повтор тика и перезапуск сторожа её не дублируют.
+   Зелёно — тот же коммит вливается в `base` (`--no-ff`, хвост сообщения `commit_ref`), задача уходит в «Готово».
    Красно или конфликт — комментарий лидеру сквада с хвостом лога, задача в `in_progress`; та же пара коммитов
-   ветки и base повторно не гоняется. Полный лог без токенов — accept/<задача>-<sha>.log рядом с state.json;
-   PATH и переменные команд задают `acceptance_path` и `acceptance_env`; по таймауту убивается вся группа процессов.
-2. Стадия закрыта, когда все её задачи в «Готово» и влиты (или отменены); удалённая ветка считается влитой.
+   повторно не гоняется. Код 75 команды — общий ресурс занят: задача ждёт и повторяет команду, ожидание не входит в
+   `acceptance_timeout`; не дождалась — приёмка отложена, а не провалена. Полный лог без токенов —
+   accept/<задача>-<sha>.log рядом с state.json; по таймауту убивается вся группа процессов.
+2. Стадия закрыта, когда все её задачи в «Готово» и влиты (или отменены).
 3. Задачи первой незакрытой стадии без исполнителя назначаются скваду (назначение стартует ран). Задача с
    «**Ждёт:**» в описании ждёт ответа заказчика: конвейер её пропускает и дальше этой стадии не идёт.
-4. Автоповтор: последний ран задачи активной стадии упал на лимите, активных ранов нет, с падения и с прошлого
-   повтора прошло `quota_retry_minutes` (20) — `issue rerun`.
+4. Инфраструктурный автоповтор задач активной стадии (см. README). Повтор после лимита провайдера здесь не делается:
+   им владеет только полоса провайдеров.
 `overrides` меняют уровень рассуждения агента на время задачи и возвращают после «Готово»; ручную правку не
 перетирают.
 
 Смена провайдера — `providers.agents`: у агента цепочка профилей (runtime, модель, уровень, custom_args),
-первый — основной. Цепочка, сохранённая на экране агента в Multica (`chains` в controls.json), перекрывает конфиг. Последний ран агента упал на лимите на текущем профиле — агент переходит на следующий профиль,
-его задачи, упавшие на лимите, перезапускаются сразу. Через `restore_hours` агент возвращается на основной
+первый — основной. Цепочка, сохранённая на экране агента в Multica (`chains` в controls.json), перекрывает конфиг. Последний ран агента упал на лимите на текущем профиле — агент переходит на следующий профиль.
+Каждый упавший на лимите ран агента попадает в учёт полосы и повторяется ровно один раз, когда профиль агента снова
+доступен (переезд, возврат, будильник): поручение исполнителя задачи — `issue rerun`, входящее поручение агенту
+(упоминание в чужой задаче, новое поручение в задаче на сдаче) — будильник именно ему. Не повторяется, если по задаче
+идёт ран, у агента там был более поздний ран, поручение обработал другой ран или задача закрыта. Через `restore_hours` агент возвращается на основной
 (не сброшен лимит — переедет снова). Runtime, упавший на лимите, остывает: до сброса из текста ошибки или дашборда
 квот, при неизвестной квоте — `restore_hours`; пока остывает, ни переезд, ни возврат, ни будильник на него не ведут.
 Новую цепочку с экрана ставит, когда у агента ничего не идёт (очередь не мешает). Раны в очереди на прежнем runtime
@@ -33,7 +40,7 @@ multica не выдаст — сторож их снимает и перезап
 загрузка подписок, журнал действий). Комментарии в задачи пишет только при провале приёмки.
 `--dry-run` печатает решения, ничего не меняет и страницу не пишет.
 """
-import contextlib, copy, datetime as dt, fcntl, html, json, os, re, shutil, signal, subprocess, sys, tempfile, time, traceback, urllib.error, urllib.request
+import contextlib, copy, datetime as dt, fcntl, html, json, os, re, shlex, shutil, signal, subprocess, sys, tempfile, time, traceback, urllib.error, urllib.request
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import control_state as control
@@ -42,8 +49,8 @@ CONFIG = Path(os.environ.get('MULTICA_CONVEYOR_CONFIG', '/etc/multica-conveyor.j
 STATE = Path(os.environ.get('MULTICA_CONVEYOR_STATE', Path.home() / '.local/state/multica-conveyor/state.json'))
 CANCELLED = {'cancelled', 'canceled'}
 HOLD = '**Ждёт:**'
-BRANCH = re.compile(r'\bt-\d+-[a-z0-9][a-z0-9-]*[a-z0-9]\b')
-OWN_BRANCH = re.compile(r'[Вв]етк\w*[^\n`]{0,12}`(t-\d+-[a-z0-9][a-z0-9-]*[a-z0-9])`')
+SHA = re.compile(r'[0-9a-f]{40}')
+BRANCH_NAME = re.compile(r'[A-Za-z0-9._][A-Za-z0-9._/-]{0,199}')
 DIFF_GUARD = re.compile(r'^\+.*(?:: any\b|as unknown as|@ts-(?:ignore|expect-error)|eslint-disable)', re.M)
 QUOTA = re.compile(r'usage limit|spend limit|rate.?limit|hit your .{0,20}limit|quota|too many requests|\b429\b', re.I)
 # Падения, которые лечатся повтором: ран не дошёл до работы из-за сервера, а не из-за задачи или модели.
@@ -58,9 +65,23 @@ ERROR_TZ = dt.timezone(dt.timedelta(hours=8))
 EVENTS_KEEP = 400
 # Что умеет этот файл: по --capabilities внешний выкатчик решает, какие таймеры включать.
 CAPABILITIES = {'schema': 1, 'lanes': ['epics', 'providers'],
-                'features': ['accept-log', 'acceptance-env', 'accept-kill-group']}
+                'features': ['accept-log', 'acceptance-env', 'accept-kill-group', 'accept-jobs', 'accept-metadata',
+                             'quota-retry-ledger']}
 ACCEPT_LOG_KEEP_DAYS = 30
 KILL_GRACE = 5
+# Задача приёмки: queued — отдана atd, running/waiting — идёт (waiting — ждёт общий ресурс), остальное — итог.
+JOB_ACTIVE = {'queued', 'running', 'waiting'}
+JOB_LOST_AFTER = 600  # с: atd запускает «at now» в ту же минуту; дольше — задача потеряна
+JOB_ATTEMPTS = 3      # запусков одной пары коммитов после потери воркера (перезагрузка, OOM)
+JOB_LOCK_WAIT = 10    # с: тик берёт замок задачи на миг, чтобы проверить, жив ли воркер
+# Код 75 (EX_TEMPFAIL) — общий ресурс занят: так test-lock проверяемого репозитория отвечает, не дождавшись замка.
+BUSY_CODES = (75,)
+# Команды не ждут замок сами (иначе ожидание съедает таймаут проверки): ждёт задача приёмки между попытками.
+ACCEPT_ENV_DEFAULTS = {'E2E_LOCK_WAIT': '0'}
+QUOTA_RETRY_KEEP_DAYS = 7
+RETRY_WAKE = ('Сторож: твой прошлый ран по этой задаче упал на лимите провайдера, сейчас профиль доступен. '
+              'Перечитай задачу и комментарии и выполни поручение{trigger}. Если оно уже выполнено — заверши ход '
+              'без комментария.')
 REDACTED = '[скрыто]'
 # Лог приёмки — вывод чужого кода: шаблоны линейные (старт только на границе «слова», длины ограничены),
 # иначе длинная строка вроде минифицированного бандла держит тик часами.
@@ -149,17 +170,33 @@ def is_stale(run, runtime_id):
         and run['runtime_id'] != runtime_id
 
 
-def quota_retry_due(runs, now, last_retry, minutes):
-    """Повторить ли задачу после лимита провайдера: нет активных ранов, последний ран упал на квоте,
-    с падения и с прошлого повтора прошло `minutes` минут."""
-    if not runs or any(r.get('status') in ACTIVE_RUN for r in runs):
-        return False
-    last = latest(runs)
-    if not is_quota_failure(last):
-        return False
-    wait = dt.timedelta(minutes=minutes)
-    ended = ts(last.get('completed_at') or last.get('created_at'))
-    return now - ended >= wait and (not last_retry or now - ts(last_retry) >= wait)
+def quota_retry_plan(run, issue_runs, issue, leader_id=None):
+    """Как повторить ран `run`, упавший на лимите. Повтор привязан к необработанному поручению этого рана, а не к
+    статусу или исполнителю задачи. Возвращает (действие, причина):
+    'wait' — по задаче идёт или ждёт ран, решим позже; 'drop' — повторять нечего;
+    'rerun' — это поручение исполнителя задачи (агента или лидера сквада), его будит `issue rerun`;
+    'wakeup' — входящее поручение агенту, которого `issue rerun` не разбудит (упоминание в чужой задаче) или
+    задача уже на сдаче, а новое поручение не выполнено: будильник именно этому агенту."""
+    if is_done(issue) or is_cancelled(issue):
+        return 'drop', 'задача закрыта'
+    if any(r.get('status') in control.ACTIVE for r in issue_runs):
+        return 'wait', 'по задаче идёт ран'
+    agent, created = run.get('agent_id'), run.get('created_at') or ''
+    last = latest([r for r in issue_runs if r.get('agent_id') == agent])
+    if last and last.get('id') != run.get('id'):
+        return 'drop', 'после падения у агента был новый ран'
+    trigger, wake = run.get('trigger_comment_id'), run.get('wakeup_id')
+    for r in issue_runs:
+        if r.get('status') != 'completed' or (r.get('created_at') or '') <= created:
+            continue
+        if (trigger and (r.get('trigger_comment_id') == trigger or trigger in (r.get('delivered_comment_ids') or []))) \
+                or (wake and r.get('wakeup_id') == wake):
+            return 'drop', 'поручение уже обработал другой ран'
+    own = issue.get('assignee_type') in ('agent', None) and issue.get('assignee_id') == agent
+    lead = issue.get('assignee_type') == 'squad' and (agent == leader_id if leader_id else bool(run.get('is_leader_task')))
+    if (own or lead) and status(issue) != 'in_review':
+        return 'rerun', ''
+    return 'wakeup', ''
 
 
 def provider_decision(runs, entry, chain_len, now, restore_hours, mode='auto', availability=None, restore_minutes=30,
@@ -205,15 +242,43 @@ def is_cancelled(issue): return status(issue) in CANCELLED or issue.get('status_
 def closed(issue): return is_cancelled(issue) or (is_done(issue) and not issue.get('unmerged'))
 
 
-def mark_unmerged(stages, branches_of, merged):
-    """Пометить задачи на сдаче (`in_review`) и в «Готово», чьи ветки ещё не в base.
-    branches_of(issue) -> ветки задачи; merged(branch) -> влита ли."""
-    for st in stages:
-        for i in st['issues']:
-            if is_done(i) or status(i) == 'in_review':
-                pending = [b for b in branches_of(i) if not merged(b)]
-                if pending:
-                    i['unmerged'] = pending
+def accept_target(issue, repo):
+    """Что принимать по задаче — только из её метаданных `branch` и `commit`, без догадок по комментариям.
+    {'branch', 'sha'} — коммит не в base и ветка указывает ровно на него; {'problem'} — принять нельзя, причина;
+    None — коммит уже в base."""
+    meta = issue.get('metadata') or {}
+    branch, sha = str(meta.get('branch') or '').strip(), str(meta.get('commit') or '').strip().lower()
+    if not branch or not sha:
+        missing = ' и '.join(k for k, v in (('branch', branch), ('commit', sha)) if not v)
+        return {'problem': f'в метаданных задачи нет {missing}'}
+    if not BRANCH_NAME.fullmatch(branch) or '..' in branch:
+        return {'problem': f'branch `{branch[:80]}` — недопустимое имя ветки'}
+    if not SHA.fullmatch(sha):
+        return {'problem': f'commit `{sha[:80]}` — не полный SHA из 40 символов'}
+    if not repo.has_commit(sha):
+        return {'problem': f'коммита {sha[:12]} нет в репозитории'}
+    if repo.contains(sha):
+        return None
+    head = repo.head(f'refs/heads/{branch}')
+    if not head:
+        return {'problem': f'ветки `{branch}` нет в репозитории'}
+    if head != sha:
+        return {'problem': f'ветка `{branch}` указывает на {head[:12]}, а в метаданных commit {sha[:12]}'}
+    return {'branch': branch, 'sha': sha}
+
+
+def mark_unmerged(issues, target_of):
+    """Пометить задачи на сдаче (`in_review`) и в «Готово», чей коммит из метаданных ещё не в base: `unmerged` —
+    его ветка, `accept` — что принимать. У задачи на сдаче, которую принять нельзя, — `accept_problem`.
+    target_of(issue) -> accept_target."""
+    for i in issues:
+        if not (is_done(i) or status(i) == 'in_review'):
+            continue
+        target = target_of(i)
+        if target and target.get('sha'):
+            i['unmerged'], i['accept'] = [target['branch']], target
+        elif target and status(i) == 'in_review':
+            i['accept_problem'] = target['problem']
 
 
 def decide(stages):
@@ -333,59 +398,85 @@ class Repo:
 
     def head(self, ref): return self.git('rev-parse', '--verify', '-q', ref).stdout.strip()
 
-    def merged(self, branch):
-        return not self.head(branch) or self.git('merge-base', '--is-ancestor', branch, self.base).returncode == 0
+    def has_commit(self, sha): return self.git('cat-file', '-e', f'{sha}^{{commit}}').returncode == 0
 
-    def accept(self, branch, commands, timeout, key='', path=None, env=None):
-        """Свежий клон ветки + свежий base + проверка диффа + команды приёмки. Возвращает (ok, причина, хвост лога).
+    def contains(self, sha):
+        """Коммит уже в base."""
+        return self.git('merge-base', '--is-ancestor', sha, self.base).returncode == 0
+
+    def accept(self, ref, commands, timeout, key='', path=None, env=None, base_ref=None, label=None, busy_codes=(),
+               wait_poll=60, wait_max=0, on_state=None):
+        """Клон коммита `ref` + поверх `base_ref` (по умолчанию свежий base) + проверка диффа + команды приёмки.
+        Возвращает {'status': passed|failed|deferred, 'reason', 'code', 'tail', 'log'}.
         path/env — acceptance_path/acceptance_env из конфига: PATH приёмки не зависит от окружения юнита.
+        Код из `busy_codes` — общий ресурс занят: команда повторяется через `wait_poll` с, пока ожидание не превысит
+        `wait_max` с (тогда deferred); ожидание не входит в `timeout`. on_state('waiting'|'running') — о переходах.
         Полный лог без токенов — accept/<ключ>-<sha>.log рядом с state.json; хвост берётся из него же."""
         tmp = tempfile.mkdtemp(prefix='conveyor-')
-        log_path = accept_log_dir() / f'{re.sub(r"[^A-Za-z0-9._-]", "_", key or branch)}-{self.head(branch)[:12] or "nosha"}.log'
+        sha = self.head(f'{ref}^{{commit}}')
+        log_path = accept_log_dir() / f'{re.sub(r"[^A-Za-z0-9._-]", "_", key or ref)}-{sha[:12] or "nosha"}.log'
         secrets = [str(v) for v in (env or {}).values()]
         run_env = {**os.environ, **{k: str(v) for k, v in (env or {}).items()}}
         if path:
             run_env['PATH'] = path
-        header = f'# ветка {branch}, PATH={run_env.get("PATH", "")}, переменные из acceptance_env: {sorted(env or {})}\n'
+        base = base_ref or f'origin/{self.base}'
+        header = f'# ветка {label or ref} ({sha[:12]}), base {base}, PATH={run_env.get("PATH", "")}, ' \
+                 f'переменные из acceptance_env: {sorted(env or {})}\n'
         raw = os.path.join(tmp, 'raw.log')
 
-        def finish(ok, why, extra=''):
+        def finish(status, why, extra='', code=None):
             text = Path(raw).read_text(errors='replace') if os.path.exists(raw) else ''
+            ok = status == 'passed'
             body = redact(header + text + (f'{extra.strip()}\n' if extra.strip() else '') + ('' if ok else f'# {why}\n'), secrets)
             log_path.parent.mkdir(parents=True, exist_ok=True)
             prune_accept_logs(log_path.parent)
             fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, 'w') as f:
                 f.write(body)
-            return ok, why, body[-1500:] if ok else f'{body[-2800:]}\nполный лог: {log_path}'
+            tail = body[-1500:] if ok else f'{body[-2800:]}\nполный лог: {log_path}'
+            return {'status': status, 'reason': why, 'code': code, 'tail': tail, 'log': str(log_path)}
 
         try:
             work = os.path.join(tmp, 'w')
-            self.git('clone', '-q', '--branch', branch, self.path, work, cwd=tmp, check=True)
-            if self.git('merge', '--no-edit', f'origin/{self.base}', cwd=work).returncode:
-                return finish(False, f'конфликт с {self.base}', self.git('diff', '--name-only', '--diff-filter=U', cwd=work).stdout)
-            diff = self.git('diff', f'origin/{self.base}', '--unified=0', '--', '.', ':(exclude)pnpm-lock.yaml', cwd=work).stdout
+            self.git('clone', '-q', '--no-checkout', self.path, work, cwd=tmp, check=True)
+            self.git('checkout', '-q', '--detach', sha or ref, cwd=work, check=True)
+            if self.git('merge', '--no-edit', base, cwd=work).returncode:
+                return finish('failed', f'конфликт с {self.base}', self.git('diff', '--name-only', '--diff-filter=U', cwd=work).stdout)
+            diff = self.git('diff', base, '--unified=0', '--', '.', ':(exclude)pnpm-lock.yaml', cwd=work).stdout
             bad = [m.group(0) for m in DIFF_GUARD.finditer(diff)]
             if bad:
-                return finish(False, 'в диффе any / as unknown as / @ts-ignore / eslint-disable', '\n'.join(bad[:10]))
+                return finish('failed', 'в диффе any / as unknown as / @ts-ignore / eslint-disable', '\n'.join(bad[:10]))
             with open(raw, 'ab', buffering=0) as out:
                 for cmd in commands:
-                    out.write(f'$ {cmd}\n'.encode())
-                    code = run_group(cmd, work, run_env, timeout, out)
+                    deadline = time.monotonic() + wait_max
+                    while True:
+                        out.write(f'$ {cmd}\n'.encode())
+                        code = run_group(cmd, work, run_env, timeout, out)
+                        if code not in busy_codes or time.monotonic() >= deadline:
+                            break
+                        out.write(f'# код {code}: общий ресурс занят, повтор через {wait_poll} с; '
+                                  f'ожидание в таймаут не входит\n'.encode())
+                        on_state and on_state('waiting')
+                        time.sleep(wait_poll)
+                        on_state and on_state('running')
+                    if code in busy_codes:
+                        return finish('deferred', f'`{cmd}`: общий ресурс занят дольше {wait_max} с (код {code}), '
+                                                  f'приёмка отложена', code=code)
                     if code is None:
-                        return finish(False, f'таймаут {timeout} с на `{cmd}`')
+                        return finish('failed', f'таймаут {timeout} с на `{cmd}`')
                     if code:
-                        return finish(False, f'`{cmd}` завершилась с кодом {code}')
-            return finish(True, 'зелёно')
+                        return finish('failed', f'`{cmd}` завершилась с кодом {code}', code=code)
+            return finish('passed', 'зелёно', code=0)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def merge(self, branch, ref):
+    def merge(self, sha, branch, ref):
+        """Влить ровно проверенный коммит, а не то, на что ветка указывает сейчас."""
         if self.git('symbolic-ref', '--short', 'HEAD').stdout.strip() != self.base:
             raise RuntimeError(f'{self.path} не на {self.base}')
         if self.git('status', '--porcelain', '--untracked-files=no').stdout.strip():
             raise RuntimeError(f'{self.path}: незакоммиченные изменения')
-        self.git('merge', '--no-ff', branch, '-m', f"Merge branch '{branch}'. {ref}", check=True)
+        self.git('merge', '--no-ff', sha, '-m', f"Merge branch '{branch}'. {ref}", check=True)
 
 
 class Watch:
@@ -439,6 +530,155 @@ class Watch:
         del ev[:-EVENTS_KEEP]
 
 
+def jobs_dir(): return STATE.parent / 'accept-jobs'
+
+
+def job_path(key, sha, base_sha):
+    """Одна пара «коммит задачи + коммит base» — один файл задачи приёмки: по нему повтор тика и перезапуск сторожа
+    находят уже запущенную проверку, а новый коммит любой из сторон — это новая проверка."""
+    return jobs_dir() / f'{re.sub(r"[^A-Za-z0-9._-]", "_", key)}-{sha[:12]}-{base_sha[:12]}.json'
+
+
+def read_job(path):
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+
+
+def write_job(path, job):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        json.dump(job, f, ensure_ascii=False, indent=1)
+    tmp.replace(path)
+
+
+@contextlib.contextmanager
+def job_lock(path, wait=0.0):
+    """Замок воркера задачи приёмки: держит его всё время проверки, ядро снимает его и при аварийном выходе.
+    Свободный замок у незавершённой задачи значит, что воркера нет."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_suffix('.lock').open('a') as lock:
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    yield False
+                    return
+                time.sleep(0.2)
+        try:
+            yield True
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def worker_alive(path):
+    with job_lock(path) as free:
+        return not free
+
+
+def launch_job(path):
+    """Отдать проверку atd. Юнит сторожа — oneshot: при выходе systemd убивает всех его потомков, а задача atd живёт
+    вне юнита, поэтому тик её не ждёт, а выкладка и перезапуск сторожа её не прерывают. Возвращает номер задачи at."""
+    out = path.with_suffix('.out')
+    cmd = (f'exec {shlex.quote(sys.executable)} -I {shlex.quote(str(Path(__file__).resolve()))} --accept-job '
+           f'{shlex.quote(str(path))} >>{shlex.quote(str(out))} 2>&1\n')
+    r = subprocess.run(['at', 'now'], input=cmd, capture_output=True, text=True, timeout=60)
+    if r.returncode:
+        raise RuntimeError(f'at now: {r.stderr.strip()[:300]}')
+    m = re.search(r'\bjob (\d+)', r.stderr)
+    return m.group(1) if m else ''
+
+
+def start_job(path, job, now):
+    """Записать задачу и отдать её atd. После запуска файл пишет только воркер: тик его не перетирает."""
+    job.update(status='queued', queued_at=now.isoformat(), attempts=job.get('attempts', 0) + 1,
+               reason=None, code=None, tail=None)
+    write_job(path, job)
+    print(f'{path.stem}: задача atd {launch_job(path) or "?"}')
+
+
+def prune_jobs(directory, now=None):
+    cutoff = (now or time.time()) - ACCEPT_LOG_KEEP_DAYS * 86400
+    for f in directory.glob('*.json'):
+        with contextlib.suppress(OSError, ValueError):
+            if f.stat().st_mtime < cutoff and (read_job(f) or {}).get('status') not in JOB_ACTIVE:
+                for p in (f, f.with_suffix('.lock'), f.with_suffix('.out')):
+                    p.unlink(missing_ok=True)
+
+
+def job_running(path, job, now):
+    """Проверка идёт: воркер держит замок или at-задача ещё может стартовать."""
+    if job.get('status') not in JOB_ACTIVE:
+        return False
+    return worker_alive(path) or (job['status'] == 'queued'
+                                  and now - ts(job['queued_at']) < dt.timedelta(seconds=JOB_LOST_AFTER))
+
+
+def refresh_job(path, job, now, retry_minutes):
+    """Довести задачу приёмки до живого состояния. Воркер пропал (перезагрузка, OOM, at-задача не стартовала) —
+    перезапуск той же задачи, не больше JOB_ATTEMPTS раз; отложенная — новая попытка через `retry_minutes`.
+    Возвращает (задача, что сделано или None)."""
+    st = job.get('status')
+    if st in JOB_ACTIVE:
+        if job_running(path, job, now):
+            return job, None
+        if job.get('attempts', 1) >= JOB_ATTEMPTS:
+            job.update(status='failed', finished_at=now.isoformat(), code=None, tail='',
+                       reason=f'проверка прерывалась {job.get("attempts", 1)} раза, воркер приёмки не доработал')
+            write_job(path, job)
+            return job, 'gave_up'
+        start_job(path, job, now)
+        return job, 'restarted'
+    if st == 'deferred' and now - ts(job['finished_at']) >= dt.timedelta(minutes=retry_minutes):
+        job['attempts'] = 0  # отложенная не прерывалась: счётчик потерь начинается заново
+        start_job(path, job, now)
+        return job, 'retried'
+    return job, None
+
+
+def run_job(path):
+    """Воркер задачи приёмки (`--accept-job`): проверка одной пары коммитов, итог — в файл задачи. Побочные действия
+    (слияние, комментарий, статус задачи) делает тик по этому итогу: у воркера нет Multica и паузы целей."""
+    with job_lock(path, wait=JOB_LOCK_WAIT) as mine:
+        job = read_job(path) if mine else None
+        if not job or job.get('status') not in JOB_ACTIVE:
+            return
+        now = now_utc()
+
+        def save(**fields):
+            job.update(fields)
+            write_job(path, job)
+
+        try:
+            cfg = json.loads(CONFIG.read_text())
+            with control.Store().locked() as settings:
+                epic = next((t for t in control.targets(cfg, settings) if t['key'] == job['epic']), None)
+                if epic:
+                    target = settings.get('targets', {}).get(job['epic'], {})
+                    paused = settings.get('paused') or target.get('paused') or not target.get('enabled', True)
+            if not epic or epic.get('repo') != job['repo']:
+                return save(status='failed', finished_at=now.isoformat(), reason='эпик убран из конфига сторожа')
+            if paused:
+                return save(status='deferred', finished_at=now.isoformat(), reason='конвейер или эпик на паузе')
+            save(status='running', started_at=now.isoformat(), pid=os.getpid())
+            result = Repo(job['repo'], job['base']).accept(
+                job['sha'], epic.get('acceptance', []), epic.get('acceptance_timeout', 1500), key=job['key'],
+                path=epic.get('acceptance_path'), env={**ACCEPT_ENV_DEFAULTS, **(epic.get('acceptance_env') or {})},
+                base_ref=job['base_sha'], label=job['branch'], busy_codes=tuple(epic.get('acceptance_busy_codes', BUSY_CODES)),
+                wait_poll=epic.get('acceptance_wait_poll', 60), wait_max=epic.get('acceptance_wait_max', 7200),
+                on_state=lambda s: save(status=s, **({'waiting_since': now_utc().isoformat()} if s == 'waiting' else {})))
+            save(**result, finished_at=now_utc().isoformat())
+        except Exception as e:
+            save(status='failed', finished_at=now_utc().isoformat(), code=None, tail=traceback.format_exc()[-1500:],
+                 reason=f'сбой проверки: {e}'[:300])
+
+
 def report_failure(m, epic, repo, key, branch, why, tail):
     lead = epic.get('lead_id')
     mention = f"[@Тимлид](mention://agent/{lead}), " if lead else ''
@@ -457,29 +697,60 @@ def report_failure(m, epic, repo, key, branch, why, tail):
     m('issue', 'update', key, '--status', 'in_progress', write=True)
 
 
-def accept_issue(m, repo, epic, issue, w):
-    """Приёмка и слияние всех невлитых веток задачи. True — задача влита целиком."""
-    key = issue['identifier']
-    for branch in issue['unmerged']:
-        pair = f"{repo.head(branch)}+{repo.head(repo.base)}"
-        if already_failed(w.state, key, branch, pair):
-            print(f"{epic['key']}: {key} {branch} уже не прошла приёмку на этих коммитах, ждём правки")
-            return False
-        print(f"{epic['key']}: {key} приёмка {branch}")
-        if w.dry:
+def accept_issue(m, repo, epic, issue, w, now=None):
+    """Приёмка задачи отдельной задачей atd и слияние по её итогу; тик проверку не ждёт. Нет задачи на эту пару
+    коммитов — запустить (по одной на эпик за раз: слияние сдвигает base остальным); идёт — ждать; зелёная — влить
+    ровно проверенный коммит; красная — один раз сообщить лидеру. True — задача влита."""
+    key, branch, sha = issue['identifier'], issue['accept']['branch'], issue['accept']['sha']
+    base_sha = repo.head(repo.base)
+    pair = f'{sha}+{base_sha}'
+    if already_failed(w.state, key, branch, pair):
+        print(f"{epic['key']}: {key} {branch} уже не прошла приёмку на этих коммитах, ждём правки")
+        issue['accept_job'] = {'status': 'failed', 'reason': 'не прошла на этих коммитах, ждём правки'}
+        return False
+    now = now or now_utc()
+    path = job_path(key, sha, base_sha)
+    job = read_job(path)
+    if w.dry:
+        print(f"{epic['key']}: {key} приёмка {branch}@{sha[:12]}: {job['status'] if job else 'будет запущена'}")
+        return False
+    prune_jobs(jobs_dir())
+    if job is None:
+        others = ((p, read_job(p) or {}) for p in jobs_dir().glob('*.json') if p != path)
+        busy = [p for p, other in others if other.get('epic') == epic['key'] and job_running(p, other, now)]
+        if busy:
+            print(f"{epic['key']}: {key} ждёт очереди приёмки, идёт {busy[0].stem}")
+            issue['accept_job'] = {'status': 'queued', 'reason': 'ждёт, пока закончится приёмка другой задачи эпика'}
             return False
         w.permit()
-        ok, why, tail = repo.accept(branch, epic.get('acceptance', []), epic.get('acceptance_timeout', 1500), key=key,
-                                    path=epic.get('acceptance_path'), env=epic.get('acceptance_env'))
-        if not ok:
-            w.state.setdefault(key, {})[branch] = pair
-            w.log('fail', f"{epic['key']}: {key} {branch} не прошла приёмку: {why}")
-            w.save()
-            report_failure(m, epic, repo, key, branch, why, tail)
-            return False
-        w.permit()
-        repo.merge(branch, epic.get('commit_ref', key))
-        w.log('merge', f"{epic['key']}: {key} {branch} принята и влита в {repo.base}")
+        job = {'epic': epic['key'], 'key': key, 'repo': epic['repo'], 'base': repo.base, 'branch': branch, 'sha': sha,
+               'base_sha': base_sha}
+        start_job(path, job, now)
+        w.log('accept', f"{epic['key']}: {key} {branch}@{sha[:12]} — приёмка запущена отдельной задачей")
+    else:
+        job, change = refresh_job(path, job, now, epic.get('acceptance_retry_minutes', 10))
+        if change == 'restarted':
+            w.log('accept', f"{epic['key']}: {key} {branch}@{sha[:12]} — воркер приёмки пропал, перезапуск "
+                            f"{job['attempts']} из {JOB_ATTEMPTS}")
+        elif change == 'retried':
+            w.log('accept', f"{epic['key']}: {key} {branch}@{sha[:12]} — новая попытка отложенной приёмки")
+    issue['accept_job'] = {'status': job['status'], 'reason': job.get('reason')}
+    if job['status'] == 'deferred' and not job.get('deferral_logged'):
+        w.log('wait', f"{epic['key']}: {key} {branch}@{sha[:12]} — приёмка отложена: {job.get('reason')}")
+        job['deferral_logged'] = True
+        write_job(path, job)
+    if job['status'] == 'failed' and not job.get('reported'):
+        w.state.setdefault(key, {})[branch] = pair
+        w.log('fail', f"{epic['key']}: {key} {branch}@{sha[:12]} не прошла приёмку: {job.get('reason')}")
+        w.save()
+        report_failure(m, epic, repo, key, branch, job.get('reason') or 'провал', job.get('tail') or '')
+        job['reported'] = True
+        write_job(path, job)
+    if job['status'] != 'passed':
+        return False
+    w.permit()
+    repo.merge(sha, branch, epic.get('commit_ref', key))
+    w.log('merge', f"{epic['key']}: {key} {branch}@{sha[:12]} принята и влита в {repo.base}")
     if not is_done(issue):
         m('issue', 'update', key, '--status', 'done', write=True)
     issue['unmerged'] = []
@@ -487,34 +758,23 @@ def accept_issue(m, repo, epic, issue, w):
     return True
 
 
-def report_branches(comments):
-    """Ветки задачи для приёмки. Своя ветка — «ветка `имя`» в последнем отчёте агента: чужие ветки в тексте
-    (соседние задачи, сообщения о провале приёмки) её не подменяют. Нет такого отчёта — любые упоминания."""
-    agent = [c.get('content') or '' for c in sorted(comments, key=lambda c: c.get('created_at') or '')
-             if c.get('author_type') == 'agent']
-    for text in reversed(agent):
-        if 'втоприёмка' in text:
-            continue
-        own = OWN_BRANCH.findall(text)
-        if own:
-            return sorted(set(own))
-    return sorted({b for text in agent for b in BRANCH.findall(text)})
+def snap_issue(i, staged=True):
+    """Задача на странице; `accept` — состояние приёмки или причина, по которой её нет."""
+    acc = i.get('accept_job') or ({'status': 'blocked', 'reason': i['accept_problem']} if i.get('accept_problem') else None)
+    return {'key': i['identifier'], 'title': i.get('title', ''), 'status': status(i), 'assigned': bool(i.get('assignee_id')),
+            'held': staged and HOLD in (i.get('description') or ''), 'unmerged': i.get('unmerged') or [], 'jobs': [],
+            'accept': acc}
 
 
 def epic_entry(epic, stages, unstaged, stage, frozen, snap_issues):
     """Строка эпика для снимка страницы; джобы задач заполняет вызывающий в snap_issues."""
     return {'key': epic['key'], 'name': epic.get('name', epic['key']), 'stage': stage,
             'kind': epic.get('kind', 'epic'), 'paused': frozen,
-            'stages': [{'stage': st['stage'], 'issues': [
-                snap_issues.setdefault(i['identifier'], {
-                    'key': i['identifier'], 'title': i.get('title', ''), 'status': status(i),
-                    'assigned': bool(i.get('assignee_id')), 'held': HOLD in (i.get('description') or ''),
-                    'unmerged': i.get('unmerged') or [], 'jobs': []}) for i in st['issues']]}
-                for st in sorted(stages, key=lambda s: s['stage'])],
-            # Подзадачи без этапа сторож не назначает, но на странице они видны.
-            'unstaged': [{'key': i['identifier'], 'title': i.get('title', ''), 'status': status(i),
-                          'assigned': bool(i.get('assignee_id')), 'held': False, 'unmerged': [],
-                          'jobs': []} for i in unstaged]}
+            'stages': [{'stage': st['stage'], 'issues': [snap_issues.setdefault(i['identifier'], snap_issue(i))
+                                                         for i in st['issues']]}
+                       for st in sorted(stages, key=lambda s: s['stage'])],
+            # Подзадачи без этапа сторож не назначает, но принимает, и на странице они видны.
+            'unstaged': [snap_issue(i, staged=False) for i in unstaged]}
 
 
 def run_epic(epic, w, snapshot, frozen=False):
@@ -530,13 +790,21 @@ def run_epic(epic, w, snapshot, frozen=False):
         unstaged = children.get('unstaged', [])
     repo = Repo(epic['repo'], epic.get('base', 'main')) if epic.get('repo') else None
     if repo:
-        def branches_of(issue):
-            comments = items(m('issue', 'comment', 'list', issue['identifier']), 'comments')
-            return report_branches(comments)
-        mark_unmerged(stages, branches_of, repo.merged)
-        to_accept = [] if frozen else decide(stages)[1]
+        # Приёмка не зависит от этапа: любая подзадача на сдаче, в том числе без этапа.
+        every = [i for st in stages for i in st['issues']] + unstaged
+        mark_unmerged(every, lambda i: accept_target(i, repo))
+        problems = w.state.setdefault('_accept_problems', {})
+        for i in every:
+            # Причина, по которой задачу на сдаче нельзя принять, — в журнал один раз, пока она не сменится.
+            if frozen or w.dry:
+                continue
+            if i.get('accept_problem') and problems.get(i['identifier']) != i['accept_problem']:
+                problems[i['identifier']] = i['accept_problem']
+                w.log('wait', f"{epic['key']}: {i['identifier']} не принимается: {i['accept_problem']}")
+            elif not i.get('accept_problem'):
+                problems.pop(i['identifier'], None)
+        to_accept = [] if frozen else [i for i in every if i.get('unmerged')]
         if to_accept and w.publish_early:
-            # Приёмка идёт до получаса, а снимок публикуется после прохода: без этого страница отстаёт на всё это время.
             w.publish_early(epic_entry(epic, stages, unstaged, decide(stages)[0], frozen, {}))
         for issue in to_accept:
             accept_issue(m, repo, epic, issue, w)
@@ -558,7 +826,6 @@ def run_epic(epic, w, snapshot, frozen=False):
         print(f"{epic['key']}: стадия {stage}, {issue['identifier']} ждёт заказчика")
     active = next(st for st in stages if st['stage'] == stage)
     now = now_utc()
-    retries = w.state.setdefault('_quota_retry', {})
     infra = w.state.setdefault('_infra_retry', {})
     infra_minutes = epic.get('infra_retry_minutes', epic.get('quota_retry_minutes', 20))
     names = snapshot.get('agent_names', {})
@@ -575,8 +842,8 @@ def run_epic(epic, w, snapshot, frozen=False):
             # Другой исход завершает последовательность; стартовавший повтор ещё не имеет исхода.
             if not w.dry:
                 infra.pop(key, None)
-        if (quota_retry_due(runs, now, retries.get(key), epic.get('quota_retry_minutes', 20)) or
-                infra_retry(runs, now, infra.get(key), infra_minutes, epic.get('infra_retry_limit', 3))):
+        # Повтор после лимита провайдера — только в полосе провайдеров; здесь — инфраструктурные падения.
+        if infra_retry(runs, now, infra.get(key), infra_minutes, epic.get('infra_retry_limit', 3)):
             # The provider lane uses this same lock for read/check/rerun.
             with control.Store().locked() as settings:
                 w.permit(settings)
@@ -586,11 +853,6 @@ def run_epic(epic, w, snapshot, frozen=False):
                 runs = items(locked_m('issue', 'runs', key), 'runs')
                 if closed(fresh) or status(fresh) == 'in_review':
                     continue
-                if quota_retry_due(runs, now, retries.get(key), epic.get('quota_retry_minutes', 20)):
-                    w.log('retry', f"{epic['key']}: {key} упала на лимите провайдера — повтор")
-                    locked_m('issue', 'rerun', key, write=True)
-                    if not w.dry:
-                        retries[key] = now.isoformat()
                 last = latest(runs)
                 if not last or not is_infra_failure(last):
                     if last and last.get('status') not in ACTIVE_RUN and not w.dry:
@@ -642,6 +904,7 @@ def _run_providers(cfg, w, snapshot, settings):
     rows = control.quota_rows(cfg)
     restore_hours, retry_minutes = pc.get('restore_hours', 5), pc.get('quota_retry_minutes', 20)
     st = w.state.setdefault('_providers', {})
+    leaders = {}  # сквад → лидер, на один проход
     # Цепочки из конфига и сохранённые на экране агента в Multica.
     for agent_id, a in control.agent_chains(cfg, settings).items():
         chain = a['chain']
@@ -711,8 +974,6 @@ def _run_providers(cfg, w, snapshot, settings):
                         actual = p
                 if not w.dry:
                     entry.update(idx=ready, since=now.isoformat(), waiting=None)
-                # Ждали сброса сколько угодно долго — задачи, упавшие перед ожиданием, тоже свои.
-                rerun_quota_failed(m, w, a, runs, agent_id, now, (ts(waiting.get('since')) or now) - dt.timedelta(hours=24))
         elif not waiting or mode != 'auto':
             decision = provider_decision(live, entry, len(chain), now, restore_hours, mode, statuses,
                                          pc.get('restore_minutes', 30), actual.get('runtime_id'))
@@ -725,8 +986,6 @@ def _run_providers(cfg, w, snapshot, settings):
                 if not w.dry:
                     entry.update(idx=idx, since=now.isoformat())
                     actual = p
-                if decision[0] == 'switch':
-                    rerun_quota_failed(m, w, a, runs, agent_id, now)
             elif decision and decision[0] == 'exhausted' and entry.get('exhausted_logged') != last.get('id'):
                 wake_idx, wake = wake_target(chain, names, cfg, now, retry_minutes, cooldowns)
                 w.log('fail', f"{a['name']}: вся цепочка на лимите, ждёт сброса — будильник на "
@@ -734,6 +993,12 @@ def _run_providers(cfg, w, snapshot, settings):
                 if not w.dry:
                     entry['exhausted_logged'] = last.get('id')
                     entry['waiting'] = {'since': now.isoformat(), 'wake_at': wake.isoformat(), 'idx': wake_idx}
+        record_quota_failures(entry, runs, now)
+        rid = actual.get('runtime_id')
+        # Повтор — когда профиль агента снова можно брать: после переезда, возврата или будильника, а не в остывающий
+        # runtime. Ручной режим и ожидание сброса всей цепочки повторов не делают.
+        if mode == 'auto' and not entry.get('waiting') and rid not in cooling and avail.get(rid) is not False:
+            retry_quota_failed(m, w, a, agent_id, entry, now, leaders)
         move_stale_queued(m, w, a, agent_id, runs, actual.get('runtime_id'))
         snapshot['agents'].append({'name': a['name'], 'idx': entry.get('idx', 0), 'chain_len': len(chain),
                                    'runtime': names.get(actual.get('runtime_id'), actual.get('runtime_id', '—')),
@@ -778,33 +1043,58 @@ def move_stale_queued(m, w, a, agent_id, runs, runtime_id):
             m('issue', 'rerun', iid, write=True)
 
 
-def rerun_quota_failed(m, w, a, runs, agent_id, now=None, after=None):
-    """Перезапустить задачи, где ран этого агента упал на лимите, пока задача ещё его. `issue rerun` будит текущего
-    исполнителя, поэтому задача, ушедшая вперёд (у другого, на сдаче, закрыта), не трогается. Своя — назначена агенту:
-    тогда последний ран агента в ней — отказ, а чужие раны после него не мешают (лидер мог отработать после падения
-    исполнителя и встать ждать сброса); или назначена скваду, а отказ — ран агента (лидера; ран от будильника не помечен
-    `is_leader_task`): тогда отказ — последний ран задачи вообще. Отказ не раньше `after` (по умолчанию сутки назад), по задаче ничего не идёт."""
-    after = after or (now or now_utc()) - dt.timedelta(hours=24)
-    failed = {}
-    for r in sorted(runs, key=lambda r: r.get('created_at') or ''):
-        if is_quota_failure(r) and r.get('issue_id'):
-            failed[r['issue_id']] = r
-    for issue_id, run in failed.items():
-        if ts(run.get('created_at')) < after:
+def record_quota_failures(entry, runs, now):
+    """Учёт упавших на лимите ранов агента: каждый — в `quota_pending` до повтора или отказа от него.
+    Учёт начинается с момента включения (`quota_since`): раны до него этот код не видел и задним числом не трогает."""
+    since = ts(entry.setdefault('quota_since', (now - dt.timedelta(minutes=10)).isoformat()))
+    pending = entry.setdefault('quota_pending', {})
+    keep = dt.timedelta(days=QUOTA_RETRY_KEEP_DAYS)
+    for r in runs:
+        created = ts(r.get('created_at'))
+        if is_quota_failure(r) and r.get('issue_id') and r.get('id') and r['id'] not in pending and created \
+                and created >= since and now - created < keep:
+            pending[r['id']] = {'issue': r['issue_id'], 'at': r['created_at']}
+    for rid in [k for k, p in pending.items() if now - ts(p['at']) >= keep]:
+        del pending[rid]
+
+
+def retry_quota_failed(m, w, a, agent_id, entry, now, leaders):
+    """Повторить каждый учтённый и ещё не повторённый ран агента, упавший на лимите, ровно один раз
+    (что делать — quota_retry_plan). Перед решением задача и её раны перечитываются."""
+    for rid, p in sorted(entry.get('quota_pending', {}).items(), key=lambda x: x[1]['at']):
+        if p.get('done'):
             continue
-        issue_runs = items(m('issue', 'runs', issue_id), 'runs')
-        own = [r for r in issue_runs if r.get('agent_id') == agent_id]
-        if not own or any(r.get('status') in control.ACTIVE for r in issue_runs) or not is_quota_failure(latest(own)):
+        try:
+            issue_runs = items(m('issue', 'runs', p['issue']), 'runs')
+            issue = m('issue', 'get', p['issue'])
+            issue = issue.get('issue', issue)
+            run = next((r for r in issue_runs if r.get('id') == rid), None)
+            squad = issue.get('assignee_id') if issue.get('assignee_type') == 'squad' else None
+            if squad and squad not in leaders:
+                leaders[squad] = m('squad', 'get', squad).get('leader_id')
+            what, why = quota_retry_plan(run, issue_runs, issue, leaders.get(squad)) if run else ('drop', 'ран не найден')
+            if what == 'wait':
+                continue
+            name = issue.get('identifier') or p['issue'][:8]
+            out = {}
+            if what == 'rerun':
+                w.log('retry', f"{a['name']}: перезапуск задачи {name} после лимита")
+                m('issue', 'rerun', p['issue'], write=True)
+            elif what == 'wakeup':
+                trigger = run.get('trigger_comment_id')
+                w.log('retry', f"{a['name']}: будильник по задаче {name} после лимита — поручение агенту")
+                args = ['issue', 'wakeup', 'create', p['issue'], '--kind', 'at', '--after', '1m', '--agent-id', agent_id,
+                        '--mode', 'once', '--instruction',
+                        RETRY_WAKE.format(trigger=f' из комментария {trigger}' if trigger else '')]
+                out = m(*args, *(['--parent', trigger] if trigger else []), write=True) or {}
+            else:
+                print(f"{a['name']}: {name} — повтор после лимита не нужен: {why}")
+        except RuntimeError as e:
+            # Сбой чтения или записи Multica — попробуем на следующем проходе; ран остаётся в учёте.
+            print(f"{a['name']}: повтор рана {rid[:8]} отложен: {e}")
             continue
-        issue = m('issue', 'get', issue_id)
-        issue = issue.get('issue', issue)
-        if status(issue) == 'in_review' or is_done(issue) or is_cancelled(issue):
-            continue
-        mine = issue.get('assignee_type') in ('agent', None) and issue.get('assignee_id') == agent_id
-        squad = issue.get('assignee_type') == 'squad' and latest(issue_runs).get('id') == latest(own).get('id')
-        if mine or squad:
-            w.log('retry', f"{a['name']}: перезапуск задачи {issue.get('identifier') or issue_id[:8]} после лимита")
-            m('issue', 'rerun', issue_id, write=True)
+        if not w.dry:
+            p.update(done=now.isoformat(), how=what, why=why, **({'wakeup': out['id']} if out.get('id') else {}))
 
 
 def needs_seed(status):
@@ -899,13 +1189,16 @@ def quotas(cfg):
 STATUS_RU = {'backlog': 'ждёт этапа', 'todo': 'к выполнению', 'in_progress': 'в работе', 'in_review': 'сдана',
              'done': 'готово', 'blocked': 'стоит', 'cancelled': 'отменена'}
 KIND_RU = {'merge': 'слияние', 'fail': 'провал', 'assign': 'запуск', 'retry': 'повтор', 'provider': 'провайдер',
-           'level': 'уровень', 'error': 'ошибка', 'stand': 'стенд'}
+           'level': 'уровень', 'error': 'ошибка', 'stand': 'стенд', 'accept': 'приёмка', 'wait': 'ожидание'}
 
 
 ICON = {  # статус пайплайна GitLab: цвет и символ в кружке
     'success': ('#108548', '✓'), 'running': ('#1f75cb', '●'), 'review': ('#6e49cb', '▸'), 'failed': ('#dd2b0e', '✕'),
     'blocked': ('#c17d10', '!'), 'created': ('#a4a3a8', '○'), 'paused': ('#a4a3a8', 'Ⅱ'), 'canceled': ('#737278', '∅'),
 }
+# Состояние задачи приёмки → значок пайплайна.
+ACCEPT_ICON = {'queued': 'created', 'running': 'running', 'waiting': 'blocked', 'deferred': 'blocked',
+               'blocked': 'blocked', 'failed': 'failed', 'passed': 'success'}
 LABEL = {'success': 'готово', 'running': 'в работе', 'review': 'на приёмке', 'failed': 'упало', 'blocked': 'стоит',
          'created': 'ждёт этапа', 'paused': 'ждёт заказчика', 'canceled': 'отменена'}
 
@@ -997,23 +1290,25 @@ def render(snapshot, events):
                 for i in unstaged)
             cols += f"<div class='stage'><h3>Без этапа</h3>{jobs}</div>"
         detail = ''
-        for st in ep['stages']:
-            if st['stage'] != ep['stage']:
+        # Раны — у активного этапа; приёмка — у любой задачи, где она идёт или невозможна, этап не важен.
+        shown = [i for st in ep['stages'] for i in st['issues'] if st['stage'] == ep['stage'] or i.get('accept')]
+        for i in shown + [i for i in unstaged if i.get('accept')]:
+            if not i['jobs'] and not i['unmerged'] and not i.get('accept'):
                 continue
-            for i in st['issues']:
-                if not i['jobs'] and not i['unmerged']:
-                    continue
-                chain = []
-                for j in i['jobs']:
-                    extra = ' · лимит' if j.get('quota') else ''
-                    chain.append(f"<span class='run' title='{e(j['status'] or '')} {e((j['at'] or '')[:16])}'>"
-                                 f"{icon(job_state(j))}{e(j['agent'])}<span class='muted'>{e(dur(j['secs']))}{extra}</span></span>")
-                ev = last_event.get(i['key'])
-                acc = 'review' if i['unmerged'] else ('success' if i['status'] == 'done' else
-                                                      'failed' if ev and ev['kind'] == 'fail' else 'created')
-                chain.append(f"<span class='run'>{icon(acc)}приёмка и слияние</span>")
-                detail += (f"<div class='sub'><b>{e(i['key'])}</b> {e(short_title(i['title']))}</div>"
-                           f"<div class='runs'>{'<span class=arrow>→</span>'.join(chain)}</div>")
+            chain = []
+            for j in i['jobs']:
+                extra = ' · лимит' if j.get('quota') else ''
+                chain.append(f"<span class='run' title='{e(j['status'] or '')} {e((j['at'] or '')[:16])}'>"
+                             f"{icon(job_state(j))}{e(j['agent'])}<span class='muted'>{e(dur(j['secs']))}{extra}</span></span>")
+            ev = last_event.get(i['key'])
+            acc = 'review' if i['unmerged'] else ('success' if i['status'] == 'done' else
+                                                  'failed' if ev and ev['kind'] == 'fail' else 'created')
+            job = i.get('accept') or {}
+            acc = ACCEPT_ICON.get(job.get('status'), acc)
+            why = f"<span class='muted'>{e(job['reason'])}</span>" if job.get('reason') else ''
+            chain.append(f"<span class='run' title='{e(job.get('status') or '')}'>{icon(acc)}приёмка и слияние{why}</span>")
+            detail += (f"<div class='sub'><b>{e(i['key'])}</b> {e(short_title(i['title']))}</div>"
+                       f"<div class='runs'>{'<span class=arrow>→</span>'.join(chain)}</div>")
         parts.append(
             f"<div class='card'><div class='head'><span class='badge' style='border-color:{ICON[ep_state][0]};color:{ICON[ep_state][0]}'>"
             f"{icon(ep_state, True)}{e(LABEL[ep_state] if ep['stage'] else 'пройден')}</span><h2 style='margin:0'>{e(ep['key'])} · "
@@ -1157,5 +1452,8 @@ def _run(cfg, dry, providers_only):
 if __name__ == '__main__':
     if '--capabilities' in sys.argv:
         print(json.dumps(CAPABILITIES, sort_keys=True))
+        sys.exit(0)
+    if '--accept-job' in sys.argv:
+        run_job(Path(sys.argv[sys.argv.index('--accept-job') + 1]))
         sys.exit(0)
     run(json.loads(CONFIG.read_text()), '--dry-run' in sys.argv, '--providers-only' in sys.argv)

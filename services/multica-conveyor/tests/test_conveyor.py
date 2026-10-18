@@ -46,30 +46,42 @@ class Decide(unittest.TestCase):
         self.assertEqual(c.decide([{'stage': 1, 'issues': [issue('A', 'done', 'sq')]}]), (None, [], [], []))
 
 
+TARGET = {'branch': 't-12345-p1', 'sha': 'a' * 40}
+
+
 class Merge(unittest.TestCase):
+    def mark(self, stages, target):
+        c.mark_unmerged([i for st in stages for i in st['issues']], lambda i: target)
+
     def test_невлитая_задача_в_готово_держит_стадию_и_идёт_на_приёмку(self):
         stages = [{'stage': 1, 'issues': [issue('A', 'done', 'sq')]}, {'stage': 2, 'issues': [issue('B')]}]
-        c.mark_unmerged(stages, lambda i: ['t-12345-p1'], lambda b: False)
+        self.mark(stages, TARGET)
         stage, to_accept, to_assign, _ = c.decide(stages)
         self.assertEqual((stage, keys(to_accept), to_assign), (1, ['A'], []))
 
     def test_сданная_задача_идёт_на_приёмку(self):
         stages = [{'stage': 1, 'issues': [issue('A', 'in_review', 'sq')]}]
-        c.mark_unmerged(stages, lambda i: ['t-12345-p1'], lambda b: False)
+        self.mark(stages, TARGET)
         self.assertEqual(keys(c.decide(stages)[1]), ['A'])
+        self.assertEqual(stages[0]['issues'][0]['accept'], TARGET)
 
     def test_задача_в_работе_на_приёмку_не_идёт(self):
         stages = [{'stage': 1, 'issues': [issue('A', 'in_progress', 'sq')]}]
-        c.mark_unmerged(stages, lambda i: ['t-12345-p1'], lambda b: False)
+        self.mark(stages, TARGET)
         self.assertEqual(c.decide(stages)[1], [])
 
     def test_влитая_задача_открывает_следующую(self):
         stages = [{'stage': 1, 'issues': [issue('A', 'done', 'sq')]}, {'stage': 2, 'issues': [issue('B')]}]
-        c.mark_unmerged(stages, lambda i: ['t-12345-p1'], lambda b: True)
+        self.mark(stages, None)
         self.assertEqual(keys(c.decide(stages)[2]), ['B'])
 
-    def test_ветка_в_тексте_находится(self):
-        self.assertEqual(c.BRANCH.findall('Ветка t-12345-p1-skeleton, коммит 7b5473d; REF-12345.'), ['t-12345-p1-skeleton'])
+    def test_причина_без_приёмки_только_у_задачи_на_сдаче(self):
+        stages = [{'stage': 1, 'issues': [issue('A', 'in_review', 'sq'), issue('B', 'done', 'sq')]}]
+        self.mark(stages, {'problem': 'в метаданных задачи нет branch и commit'})
+        a, b = stages[0]['issues']
+        self.assertEqual(a['accept_problem'], 'в метаданных задачи нет branch и commit')
+        self.assertNotIn('accept_problem', b)
+        self.assertEqual(c.decide(stages)[1], [])
 
     def test_проверка_диффа(self):
         self.assertTrue(c.DIFF_GUARD.search('+const x: any = 1'))
@@ -111,31 +123,32 @@ class RepoAcceptance(unittest.TestCase):
 
     def test_зелёная_ветка_вливается(self):
         self.branch('t-1-ok', 'ok.ts', 'export const x: number = 1\n')
-        ok, why, _ = self.r.accept('t-1-ok', ['test -f ok.ts'], 60)
-        self.assertTrue(ok, why)
-        self.r.merge('t-1-ok', 'REF-1')
-        self.assertTrue(self.r.merged('t-1-ok'))
+        res = self.r.accept('t-1-ok', ['test -f ok.ts'], 60)
+        self.assertEqual(res['status'], 'passed', res['reason'])
+        sha = self.r.head('t-1-ok')
+        self.r.merge(sha, 't-1-ok', 'REF-1')
+        self.assertTrue(self.r.contains(sha))
 
     def test_красная_команда_не_вливается(self):
         self.branch('t-1-red', 'red.ts', 'export const y = 2\n')
-        ok, why, _ = self.r.accept('t-1-red', ['false'], 60)
-        self.assertFalse(ok)
-        self.assertIn('`false`', why)
-        self.assertFalse(self.r.merged('t-1-red'))
+        res = self.r.accept('t-1-red', ['false'], 60)
+        self.assertEqual((res['status'], res['code']), ('failed', 1))
+        self.assertIn('`false`', res['reason'])
+        self.assertFalse(self.r.contains(self.r.head('t-1-red')))
 
     def test_any_в_диффе_не_вливается(self):
         self.branch('t-1-any', 'any.ts', 'export const z: any = 3\n')
-        ok, why, _ = self.r.accept('t-1-any', ['true'], 60)
-        self.assertFalse(ok)
-        self.assertIn('any', why)
+        res = self.r.accept('t-1-any', ['true'], 60)
+        self.assertEqual(res['status'], 'failed')
+        self.assertIn('any', res['reason'])
 
     def test_конфликт_с_main(self):
         self.branch('t-1-conf', 'a.txt', 'ветка\n')
         Path(self.repo, 'a.txt').write_text('main\n')
         sh(self.repo, 'git', 'commit', '-qam', 'main меняет a')
-        ok, why, _ = self.r.accept('t-1-conf', ['true'], 60)
-        self.assertFalse(ok)
-        self.assertIn('конфликт', why)
+        res = self.r.accept('t-1-conf', ['true'], 60)
+        self.assertEqual(res['status'], 'failed')
+        self.assertIn('конфликт', res['reason'])
 
 
 class Providers(unittest.TestCase):
@@ -312,19 +325,6 @@ class MetaExecution(unittest.TestCase):
                 c.run(cfg, False)
             self.assertEqual(sorted(seen['keys']), ['TASK-2', 'TASK-3'])
 
-    def test_ветки_задачи_берутся_из_последнего_отчёта_а_не_из_упоминаний(self):
-        def comment(at, text, who='agent'):
-            return {'created_at': at, 'author_type': who, 'content': text}
-        comments = [
-            comment('16:04', 'Ветка `t-12345-assignments-list`. Не трогает `t-12345-header-kpi` и t-12345-qa-fixture-f0'),
-            comment('18:44', 'Итог: прошло, ветка `t-12345-assignments-list`, коммит 947e7d1'),
-            comment('19:36', 'Автоприёмка упала: ветка `t-12345-header-kpi`, таймаут'),
-            comment('19:40', 'ветка `t-12345-other`', who='member'),
-        ]
-        self.assertEqual(c.report_branches(comments), ['t-12345-assignments-list'])
-        # Без «ветка `…`» работает прежнее правило — любые упоминания агентов.
-        self.assertEqual(c.report_branches([comment('1', 'сдано в t-5-fix-a и t-5-fix-b')]), ['t-5-fix-a', 't-5-fix-b'])
-
     def test_пауза_цели_морозит_только_её(self):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
@@ -359,15 +359,18 @@ class MetaExecution(unittest.TestCase):
 
     def test_пауза_после_тестов_не_даёт_слить_ветку(self):
         from unittest.mock import Mock
-        repo = Mock()
-        repo.head.return_value = 'sha'
-        repo.accept.return_value = (True, 'зелёно', '')
-        watch = Mock(state={}, dry=False)
-        watch.permit.side_effect = [None, c.AutomationPaused('пауза')]
-        with self.assertRaises(c.AutomationPaused):
-            c.accept_issue(Mock(), repo, {'key': 'TASK-1'},
-                           {'identifier': 'TASK-2', 'unmerged': ['t-1-test'], 'status': 'in_review'}, watch)
-        repo.merge.assert_not_called()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(c, 'STATE', Path(tmp) / 'state.json'):
+            repo = Mock(base='main')
+            repo.head.return_value = 'b' * 40
+            sha = 'a' * 40
+            c.write_job(c.job_path('TASK-2', sha, 'b' * 40), {'status': 'passed', 'epic': 'TASK-1'})
+            watch = Mock(state={}, dry=False)
+            watch.permit.side_effect = c.AutomationPaused('пауза')
+            with self.assertRaises(c.AutomationPaused):
+                c.accept_issue(Mock(), repo, {'key': 'TASK-1'},
+                               {'identifier': 'TASK-2', 'unmerged': ['t-1-test'], 'status': 'in_review',
+                                'accept': {'branch': 't-1-test', 'sha': sha}}, watch)
+            repo.merge.assert_not_called()
 
     def test_отдельная_задача_назначается_без_поиска_детей(self):
         from unittest.mock import Mock, patch
@@ -443,36 +446,6 @@ class Stands(unittest.TestCase):
         self.assertEqual((login[3], login[4]), (url, {'principalId': 'op-1'}))
         sync = [x for x in calls if x[1] == '/api/v1/sync/sphere'][0]
         self.assertEqual(sync[2], 'csrf1')
-
-
-class QuotaRetry(unittest.TestCase):
-    now = c.ts('2026-10-16T04:00:00Z')
-
-    def run_(self, status, ended, reason='agent_error.provider_quota_limit', error=''):
-        return {'status': status, 'created_at': ended, 'completed_at': ended, 'failure_reason': reason, 'error': error}
-
-    def test_лимит_20_минут_назад_повторяется(self):
-        self.assertTrue(c.quota_retry_due([self.run_('failed', '2026-10-16T03:30:00Z')], self.now, None, 20))
-
-    def test_лимит_только_что_ждём(self):
-        self.assertFalse(c.quota_retry_due([self.run_('failed', '2026-10-16T03:50:00Z')], self.now, None, 20))
-
-    def test_есть_активный_ран_не_трогаем(self):
-        runs = [self.run_('failed', '2026-10-16T03:00:00Z'), {'status': 'running', 'created_at': '2026-10-16T03:10:00Z'}]
-        self.assertFalse(c.quota_retry_due(runs, self.now, None, 20))
-
-    def test_обычная_ошибка_не_повторяется(self):
-        self.assertFalse(c.quota_retry_due([self.run_('failed', '2026-10-16T03:00:00Z', 'agent_error.crash', 'boom')], self.now, None, 20))
-
-    def test_лимит_по_тексту_ошибки(self):
-        self.assertTrue(c.quota_retry_due([self.run_('failed', '2026-10-16T03:00:00Z', '', 'You’ve hit your usage limit')], self.now, None, 20))
-
-    def test_недавний_повтор_не_повторяется(self):
-        self.assertFalse(c.quota_retry_due([self.run_('failed', '2026-10-16T03:00:00Z')], self.now, '2026-10-16T03:50:00+00:00', 20))
-
-    def test_последний_ран_успешный(self):
-        runs = [self.run_('failed', '2026-10-16T03:00:00Z'), {'status': 'completed', 'created_at': '2026-10-16T03:10:00Z'}]
-        self.assertFalse(c.quota_retry_due(runs, self.now, None, 20))
 
 
 O = [{'issue': 'F', 'agent_id': 'be', 'thinking_level': 'xhigh', 'restore': 'high'}]
