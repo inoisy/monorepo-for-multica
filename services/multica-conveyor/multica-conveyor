@@ -57,13 +57,16 @@ CAPABILITIES = {'schema': 1, 'lanes': ['epics', 'providers'],
 ACCEPT_LOG_KEEP_DAYS = 30
 KILL_GRACE = 5
 REDACTED = '[скрыто]'
-SECRET_NAME = r'[\w.-]*(?:token|secret|passw(?:or)?d|passwd|api[_-]?key|credential|private[_-]?key|authorization)[\w.-]*'
+# Лог приёмки — вывод чужого кода: шаблоны линейные (старт только на границе «слова», длины ограничены),
+# иначе длинная строка вроде минифицированного бандла держит тик часами.
+SECRET_NAME = r'[\w.-]{0,64}?(?:token|secret|passw(?:or)?d|passwd|api[_-]?key|credential|private[_-]?key|authorization)[\w.-]{0,64}'
 SECRET_PATTERNS = [
-    (re.compile(r'(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}'), r'\1 ' + REDACTED),
-    (re.compile(r'(?i)\b(' + SECRET_NAME + r')(\s*[=:]\s*)("[^"\n]*"|\'[^\'\n]*\'|[^\s"\']+)'), r'\1\2' + REDACTED),
-    (re.compile(r'(?<=://)[^/\s:@]+:[^/\s@]+(?=@)'), REDACTED),
-    (re.compile(r'\b(?:gh[pousr]_|github_pat_|glpat-|sk-|xox[abp]-|npm_|AKIA)[A-Za-z0-9_-]{10,}'), REDACTED),
-    (re.compile(r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}'), REDACTED),
+    (re.compile(r'(?i)(?<![\w])(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,256}'), r'\1 ' + REDACTED),
+    (re.compile(r'(?i)(?<![\w.-])(' + SECRET_NAME + r')(\s{0,8}[=:]\s{0,8})("[^"\n]{0,512}"|\'[^\'\n]{0,512}\'|[^\s"\']{1,512})'),
+     r'\1\2' + REDACTED),
+    (re.compile(r'(?<=://)[^/\s:@]{1,128}:[^/\s@]{1,256}(?=@)'), REDACTED),
+    (re.compile(r'\b(?:gh[pousr]_|github_pat_|glpat-|sk-|xox[abp]-|npm_|AKIA)[A-Za-z0-9_-]{10,256}'), REDACTED),
+    (re.compile(r'\beyJ[A-Za-z0-9_-]{8,2048}\.[A-Za-z0-9_-]{8,2048}\.[A-Za-z0-9_-]{4,2048}'), REDACTED),
 ]
 
 
