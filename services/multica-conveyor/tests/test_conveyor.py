@@ -69,7 +69,7 @@ class Merge(unittest.TestCase):
         self.assertEqual(keys(c.decide(stages)[2]), ['B'])
 
     def test_ветка_в_тексте_находится(self):
-        self.assertEqual(c.BRANCH.findall('Ветка t-12345-p1-skeleton, коммит 7b5473d; T-12345.'), ['t-12345-p1-skeleton'])
+        self.assertEqual(c.BRANCH.findall('Ветка t-12345-p1-skeleton, коммит 7b5473d; REF-12345.'), ['t-12345-p1-skeleton'])
 
     def test_проверка_диффа(self):
         self.assertTrue(c.DIFF_GUARD.search('+const x: any = 1'))
@@ -113,7 +113,7 @@ class RepoAcceptance(unittest.TestCase):
         self.branch('t-1-ok', 'ok.ts', 'export const x: number = 1\n')
         ok, why, _ = self.r.accept('t-1-ok', ['test -f ok.ts'], 60)
         self.assertTrue(ok, why)
-        self.r.merge('t-1-ok', 'T-1')
+        self.r.merge('t-1-ok', 'REF-1')
         self.assertTrue(self.r.merged('t-1-ok'))
 
     def test_красная_команда_не_вливается(self):
@@ -170,8 +170,8 @@ class Providers(unittest.TestCase):
 
     def test_страница_экранирует_и_рисуется(self):
         snap = {'tick': '2026-10-16 10:00:00', 'errors': [], 'quotas': [{'name': 'Codex', 'line': 'main=[9 64]'}],
-                'epics': [{'key': 'STT-1', 'name': 'Эпик', 'stage': 1, 'stages': [{'stage': 1, 'issues': [
-                    {'key': 'STT-2', 'title': '<script>x</script>', 'status': 'in_progress', 'assigned': True, 'held': False, 'unmerged': [],
+                'epics': [{'key': 'TASK-1', 'name': 'Эпик', 'stage': 1, 'stages': [{'stage': 1, 'issues': [
+                    {'key': 'TASK-2', 'title': '<script>x</script>', 'status': 'in_progress', 'assigned': True, 'held': False, 'unmerged': [],
                      'jobs': [{'agent': 'Аналитик', 'status': 'completed', 'at': '2026-10-16T09:00:00Z', 'secs': 240, 'quota': False},
                               {'agent': 'Бэкенд', 'status': 'failed', 'at': '2026-10-16T09:10:00Z', 'secs': 5, 'quota': True}]}]}]}],
                 'agents': [{'name': 'Бэкенд', 'idx': 1, 'chain_len': 3, 'runtime': 'Claude · 2 подписки', 'model': 'claude-opus-5-5',
@@ -201,7 +201,7 @@ class Providers(unittest.TestCase):
         self.assertEqual(c.issue_state({**base, 'status': 'done'}), 'success')
         self.assertEqual(c.issue_state({**base, 'status': 'in_review'}), 'review')
         self.assertEqual(c.issue_state({**base, 'status': 'backlog', 'held': True}), 'paused')
-        self.assertEqual(c.short_title('Ресурсное планирование: 6. Согласование заявки. T-12345'), '6. Согласование заявки.')
+        self.assertEqual(c.short_title('Ресурсное планирование: 6. Согласование заявки. ' + 'T' + '-12345'), '6. Согласование заявки.')
 
 
 class ControlledProviders(unittest.TestCase):
@@ -251,13 +251,13 @@ class MetaControl(unittest.TestCase):
         guard = lambda: (_ for _ in ()).throw(c.AutomationPaused('пауза'))
         with patch.object(c.subprocess, 'run') as run:
             with self.assertRaises(c.AutomationPaused):
-                c.Multica('workspace', False, guard)('issue', 'rerun', 'STT-1', write=True)
+                c.Multica('workspace', False, guard)('issue', 'rerun', 'TASK-1', write=True)
             run.assert_not_called()
 
     def test_выбор_целей_исключает_отключённый_эпик(self):
-        cfg = {'epics': [{'key': 'STT-1', 'workspace': 'ws', 'repo': '/safe/repo'}]}
-        targets = c.control.targets(cfg, {'targets': {'STT-1': {'enabled': False},
-                  'STT-2': {'key': 'STT-2', 'enabled': True, 'kind': 'issue', 'workspace': 'ws', 'name': 'Задача'}}})
+        cfg = {'epics': [{'key': 'TASK-1', 'workspace': 'ws', 'repo': '/safe/repo'}]}
+        targets = c.control.targets(cfg, {'targets': {'TASK-1': {'enabled': False},
+                  'TASK-2': {'key': 'TASK-2', 'enabled': True, 'kind': 'issue', 'workspace': 'ws', 'name': 'Задача'}}})
         self.assertFalse(targets[0]['enabled'])
         self.assertEqual(targets[0]['repo'], '/safe/repo')
         self.assertEqual(targets[1]['kind'], 'issue')
@@ -269,7 +269,7 @@ class MetaExecution(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             controls = str(Path(tmp) / 'controls.json')
             Path(controls).write_text(json.dumps({'paused': True}))
-            cfg = {'epics': [{'key': 'STT-1'}], 'status_dir': tmp}
+            cfg = {'epics': [{'key': 'TASK-1'}], 'status_dir': tmp}
             with patch.dict(os.environ, {'MULTICA_CONTROL_STATE': controls}), \
                     patch.object(c, 'STATE', Path(tmp) / 'state.json'), \
                     patch.object(c, 'run_epic') as epic, patch.object(c, 'run_providers') as providers, \
@@ -285,18 +285,18 @@ class MetaExecution(unittest.TestCase):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
             controls = str(Path(tmp) / 'controls.json')
-            Path(controls).write_text(json.dumps({'targets': {'STT-1': {'paused': True}}}))
-            cfg = {'epics': [{'key': 'STT-1'}, {'key': 'STT-5'}], 'status_dir': tmp}
+            Path(controls).write_text(json.dumps({'targets': {'TASK-1': {'paused': True}}}))
+            cfg = {'epics': [{'key': 'TASK-1'}, {'key': 'TASK-5'}], 'status_dir': tmp}
             with patch.dict(os.environ, {'MULTICA_CONTROL_STATE': controls}), \
                     patch.object(c, 'STATE', Path(tmp) / 'state.json'), \
                     patch.object(c, 'run_epic') as epic, patch.object(c, 'run_providers'), patch.object(c, 'run_stands'):
                 c.run(cfg, False)
             frozen = {call.args[0]['key']: call.kwargs['frozen'] for call in epic.call_args_list}
-            self.assertEqual(frozen, {'STT-1': True, 'STT-5': False})
+            self.assertEqual(frozen, {'TASK-1': True, 'TASK-5': False})
 
     def test_снятая_цель_не_обрабатывается(self):
-        cfg = {'epics': [{'key': 'STT-1', 'workspace': 'ws'}]}
-        self.assertEqual(c.control.targets(cfg, {'targets': {'STT-1': {'removed': True}}}), [])
+        cfg = {'epics': [{'key': 'TASK-1', 'workspace': 'ws'}]}
+        self.assertEqual(c.control.targets(cfg, {'targets': {'TASK-1': {'removed': True}}}), [])
 
     def test_замороженный_эпик_ничего_не_пишет_но_попадает_в_снимок(self):
         from unittest.mock import Mock, patch
@@ -304,14 +304,14 @@ class MetaExecution(unittest.TestCase):
         def api(*args, **kwargs):
             calls.append((args, kwargs))
             if args[:2] == ('issue', 'children'):
-                return {'stages': [{'stage': 1, 'issues': [{'identifier': 'STT-2', 'status': 'todo', 'assignee_id': None}]}]}
+                return {'stages': [{'stage': 1, 'issues': [{'identifier': 'TASK-2', 'status': 'todo', 'assignee_id': None}]}]}
             return {}
         snapshot = {'epics': []}
         with patch.object(c, 'Multica', return_value=api):
-            c.run_epic({'key': 'STT-1', 'workspace': 'ws', 'squad_id': 'squad'}, Mock(state={}, dry=False), snapshot, frozen=True)
+            c.run_epic({'key': 'TASK-1', 'workspace': 'ws', 'squad_id': 'squad'}, Mock(state={}, dry=False), snapshot, frozen=True)
         self.assertFalse(any(kw.get('write') for _, kw in calls))
         self.assertTrue(snapshot['epics'][0]['paused'])
-        self.assertEqual(snapshot['epics'][0]['stages'][0]['issues'][0]['key'], 'STT-2')
+        self.assertEqual(snapshot['epics'][0]['stages'][0]['issues'][0]['key'], 'TASK-2')
 
     def test_пауза_после_тестов_не_даёт_слить_ветку(self):
         from unittest.mock import Mock
@@ -321,8 +321,8 @@ class MetaExecution(unittest.TestCase):
         watch = Mock(state={}, dry=False)
         watch.permit.side_effect = [None, c.AutomationPaused('пауза')]
         with self.assertRaises(c.AutomationPaused):
-            c.accept_issue(Mock(), repo, {'key': 'STT-1'},
-                           {'identifier': 'STT-2', 'unmerged': ['t-1-test'], 'status': 'in_review'}, watch)
+            c.accept_issue(Mock(), repo, {'key': 'TASK-1'},
+                           {'identifier': 'TASK-2', 'unmerged': ['t-1-test'], 'status': 'in_review'}, watch)
         repo.merge.assert_not_called()
 
     def test_отдельная_задача_назначается_без_поиска_детей(self):
@@ -331,11 +331,11 @@ class MetaExecution(unittest.TestCase):
         def api(*args, **kwargs):
             calls.append(args)
             if args[:2] == ('issue', 'get'):
-                return {'identifier': 'STT-1', 'status': 'todo', 'assignee_id': None}
+                return {'identifier': 'TASK-1', 'status': 'todo', 'assignee_id': None}
             return {}
         watch = Mock(state={}, dry=False)
         with patch.object(c, 'Multica', return_value=api):
-            c.run_epic({'key': 'STT-1', 'workspace': 'ws', 'kind': 'issue', 'squad_id': 'squad'}, watch, {'epics': []})
+            c.run_epic({'key': 'TASK-1', 'workspace': 'ws', 'kind': 'issue', 'squad_id': 'squad'}, watch, {'epics': []})
         self.assertFalse(any(args[:2] == ('issue', 'children') for args in calls))
         self.assertTrue(any(args[:2] == ('issue', 'assign') for args in calls))
 

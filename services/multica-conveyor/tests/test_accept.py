@@ -41,11 +41,11 @@ class AcceptLog(unittest.TestCase):
         self.r = c.Repo(str(self.repo), 'main')
 
     def log_file(self):
-        return self.tmp / 'state' / 'accept' / f'STT-1-{self.sha[:12]}.log'
+        return self.tmp / 'state' / 'accept' / f'TASK-1-{self.sha[:12]}.log'
 
     def test_полный_лог_пишется_и_токены_скрыты(self):
         cmds = ['echo "шаг один"', 'echo token=ghp_abcdefghijklmnopqrstuv; echo "$CONFIG_VALUE"; seq 1 500; false']
-        ok, why, tail = self.r.accept('t-1-x', cmds, 60, key='STT-1', env={'CONFIG_VALUE': 'hunter2-value'})
+        ok, why, tail = self.r.accept('t-1-x', cmds, 60, key='TASK-1', env={'CONFIG_VALUE': 'hunter2-value'})
         self.assertFalse(ok)
         log = self.log_file().read_text()
         self.assertIn('шаг один', log)
@@ -58,7 +58,7 @@ class AcceptLog(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.log_file().stat().st_mode), 0o600)
 
     def test_зелёная_приёмка_тоже_оставляет_лог(self):
-        ok, _, _ = self.r.accept('t-1-x', ['echo зелёно-по-логу'], 60, key='STT-1')
+        ok, _, _ = self.r.accept('t-1-x', ['echo зелёно-по-логу'], 60, key='TASK-1')
         self.assertTrue(ok)
         self.assertIn('зелёно-по-логу', self.log_file().read_text())
 
@@ -70,13 +70,13 @@ class AcceptLog(unittest.TestCase):
         tool.chmod(0o755)
         path = f'{tools}:/usr/bin:/bin'
         ok, why, _ = self.r.accept('t-1-x', ['only-here', 'test "$MARKER" = on', 'test "$PATH" = "' + path + '"'], 60,
-                                   key='STT-1', path=path, env={'MARKER': 'on'})
+                                   key='TASK-1', path=path, env={'MARKER': 'on'})
         self.assertTrue(ok, why)
         header = self.log_file().read_text().splitlines()[0]
         self.assertIn(path, header)
         self.assertIn("'MARKER'", header)
         self.assertNotIn('=on', header)
-        ok, why, _ = self.r.accept('t-1-x', ['only-here'], 60, key='STT-1', path='/usr/bin:/bin')
+        ok, why, _ = self.r.accept('t-1-x', ['only-here'], 60, key='TASK-1', path='/usr/bin:/bin')
         self.assertFalse(ok)
         self.assertIn('`only-here`', why)
 
@@ -85,7 +85,7 @@ class AcceptLog(unittest.TestCase):
         cmd = f'sh -c \'trap "" TERM; echo $$ > {pidfile}; sleep 300\' & wait'
         with patch.object(c, 'KILL_GRACE', 1):
             started = time.monotonic()
-            ok, why, _ = self.r.accept('t-1-x', [cmd], 2, key='STT-1')
+            ok, why, _ = self.r.accept('t-1-x', [cmd], 2, key='TASK-1')
         self.assertFalse(ok)
         self.assertIn('таймаут 2 с', why)
         self.assertLess(time.monotonic() - started, 30)
