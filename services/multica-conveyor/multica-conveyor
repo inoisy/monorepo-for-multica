@@ -45,6 +45,10 @@ HOLD = '**Ждёт:**'
 BRANCH = re.compile(r'\bt-\d+-[a-z0-9][a-z0-9-]*[a-z0-9]\b')
 DIFF_GUARD = re.compile(r'^\+.*(?:: any\b|as unknown as|@ts-(?:ignore|expect-error)|eslint-disable)', re.M)
 QUOTA = re.compile(r'usage limit|spend limit|rate.?limit|hit your .{0,20}limit|quota|too many requests|\b429\b', re.I)
+# Падения, которые лечатся повтором: ран не дошёл до работы из-за сервера, а не из-за задачи или модели.
+INFRA = re.compile(r'require-vless|initialize failed|handshake timeout|daemon restarted|routing discovery failed|'
+                   r'control protocol failed|process exited|timed? ?out\b|ETIMEDOUT|ECONNRESET|ECONNREFUSED|'
+                   r'connection (?:reset|refused)', re.I)
 ACTIVE_RUN = {'queued', 'running', 'dispatched', 'pending'}
 RUNNING = control.ACTIVE - {'queued'}
 # «Your limit will reset at 2026-10-19 13:34:35» — z.ai пишет время сброса по Пекину и без пояса.
@@ -83,7 +87,29 @@ def is_quota_failure(run):
         'quota' in (run.get('failure_reason') or '') or bool(QUOTA.search(run.get('error') or '')))
 
 
+def is_infra_failure(run):
+    return run.get('status') == 'failed' and not is_quota_failure(run) and (
+        run.get('failure_reason') == 'runtime_recovery' or bool(INFRA.search(run.get('error') or '')))
+
+
 def latest(runs): return max(runs, key=lambda r: r.get('created_at') or '') if runs else None
+
+
+def infra_retry(runs, now, mem, minutes, limit):
+    """Что делать с задачей, чей последний ран упал на инфраструктуре: 'retry' — повторить, 'give_up' — `limit`
+    повторов подряд не помогли, ждать человека, None — ничего (идёт ран, падение не то, рано).
+    mem — {'at': время прошлого повтора, 'n': повторов подряд}."""
+    if not runs or any(r.get('status') in ACTIVE_RUN for r in runs):
+        return None
+    last = latest(runs)
+    if not is_infra_failure(last):
+        return None
+    wait = dt.timedelta(minutes=minutes)
+    if now - ts(last.get('completed_at') or last.get('created_at')) < wait:
+        return None
+    if (mem or {}).get('n', 0) >= limit:
+        return 'give_up'
+    return 'retry' if not (mem or {}).get('at') or now - ts(mem['at']) >= wait else None
 
 
 def error_reset(text):
@@ -508,6 +534,8 @@ def run_epic(epic, w, snapshot, frozen=False):
     active = next(st for st in stages if st['stage'] == stage)
     now = now_utc()
     retries = w.state.setdefault('_quota_retry', {})
+    infra = w.state.setdefault('_infra_retry', {})
+    infra_minutes = epic.get('infra_retry_minutes', epic.get('quota_retry_minutes', 20))
     names = snapshot.get('agent_names', {})
     for issue in active['issues']:
         key = issue['identifier']
@@ -517,7 +545,13 @@ def run_epic(epic, w, snapshot, frozen=False):
         snap_issues[key]['jobs'] = jobs_of(runs, names)
         if frozen or closed(issue) or issue.get('unmerged'):
             continue
-        if quota_retry_due(runs, now, retries.get(key), epic.get('quota_retry_minutes', 20)):
+        last = latest(runs)
+        if last and last.get('status') not in ACTIVE_RUN and not is_infra_failure(last):
+            # Другой исход завершает последовательность; стартовавший повтор ещё не имеет исхода.
+            if not w.dry:
+                infra.pop(key, None)
+        if (quota_retry_due(runs, now, retries.get(key), epic.get('quota_retry_minutes', 20)) or
+                infra_retry(runs, now, infra.get(key), infra_minutes, epic.get('infra_retry_limit', 3))):
             # The provider lane uses this same lock for read/check/rerun.
             with control.Store().locked() as settings:
                 w.permit(settings)
@@ -525,12 +559,30 @@ def run_epic(epic, w, snapshot, frozen=False):
                 fresh = locked_m('issue', 'get', key)
                 fresh = fresh.get('issue', fresh)
                 runs = items(locked_m('issue', 'runs', key), 'runs')
-                if not closed(fresh) and status(fresh) != 'in_review' and quota_retry_due(
-                        runs, now, retries.get(key), epic.get('quota_retry_minutes', 20)):
+                if closed(fresh) or status(fresh) == 'in_review':
+                    continue
+                if quota_retry_due(runs, now, retries.get(key), epic.get('quota_retry_minutes', 20)):
                     w.log('retry', f"{epic['key']}: {key} упала на лимите провайдера — повтор")
                     locked_m('issue', 'rerun', key, write=True)
                     if not w.dry:
                         retries[key] = now.isoformat()
+                last = latest(runs)
+                if not last or not is_infra_failure(last):
+                    if last and last.get('status') not in ACTIVE_RUN and not w.dry:
+                        infra.pop(key, None)
+                    continue
+                mem = infra.get(key, {})
+                action = infra_retry(runs, now, mem, infra_minutes, epic.get('infra_retry_limit', 3))
+                if action == 'retry':
+                    # Не пишем сырой текст ошибки рана: он может содержать credentials.
+                    w.log('retry', f"{epic['key']}: {key} — ран упал на инфраструктуре, повтор")
+                    locked_m('issue', 'rerun', key, write=True)
+                    if not w.dry:
+                        infra[key] = {'at': now.isoformat(), 'n': mem.get('n', 0) + 1}
+                elif action == 'give_up' and not mem.get('gave_up'):
+                    w.log('fail', f"{epic['key']}: {key} — {mem.get('n', 0)} повтора подряд упали на инфраструктуре, жду человека")
+                    if not w.dry:
+                        infra[key] = {**mem, 'gave_up': True}
     for issue in [] if frozen else to_assign:
         w.log('assign', f"{epic['key']}: стадия {stage}, {issue['identifier']} → сквад")
         if status(issue) in ('backlog', None):

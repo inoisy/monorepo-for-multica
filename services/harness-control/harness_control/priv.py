@@ -49,7 +49,7 @@ def main(argv, env=None, out=sys.stdout, system=None, spawn=None):
     except Exception as e:  # состояние недоступно, БД повреждена и т.п.: отказ в том же формате, а не traceback
         result = HarnessError('internal', f'{type(e).__name__}: {str(e)[:300]}').to_dict()
     out.write(client.dumps(result) + '\n')
-    return 1 if 'error' in result else 0
+    return 1 if client.is_error(result) else 0
 
 
 def _current_owner():

@@ -249,7 +249,7 @@ def row_caps(cfg):
 
 
 def row_key(name, keys):
-    """Строка реестра для строки дашборда: точное имя или имя с тарифом в скобках («Claude · Евгений (Max 5x)»)."""
+    """Строка реестра для строки дашборда: точное имя или имя с тарифом в скобках («Claude · основная (Max 5x)»)."""
     if name in keys:
         return name
     return next((k for k in keys if name.startswith(k + ' (')), None)

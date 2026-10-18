@@ -14,6 +14,11 @@ def dumps(result):
     return json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
 
 
+def is_error(result):
+    """У операции ключ error есть и при успехе; отказом считается только заполненная ошибка."""
+    return bool(result.get('error'))
+
+
 def install_command():
     # Путь не берётся рядом с адаптером: из рабочего каталога агента он указал бы оператору на файл, который агент может менять.
     return ('оператор (root): собрать пакет из проверенного коммита (bootstrap/build-release.sh), сверить SHA256, '

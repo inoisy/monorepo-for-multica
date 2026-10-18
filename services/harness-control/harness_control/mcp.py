@@ -21,7 +21,7 @@ def call_tool(name, arguments, call=client.call):
     except HarnessError as e:
         return True, client.dumps(e.to_dict())
     result = call(verb, tokens)
-    return 'error' in result, client.dumps(result)
+    return client.is_error(result), client.dumps(result)
 
 
 def reply(out, msg_id, result=None, error=None):
