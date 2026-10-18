@@ -4,13 +4,15 @@
 Конфиг — /etc/multica-conveyor.json. Приёмка: multica-conveyor.timer раз в 2 минуты.
 Провайдеры: multica-provider.timer раз в минуту, --providers-only, независимо от приёмки.
 Оба запуска от agents, у каждого свой run-lock; state.json сливается атомарно под коротким lock.
+--capabilities печатает JSON с полосами и функциями этого файла (без конфига) — по нему выкатчик решает, включать ли таймеры.
 
 Конвейер — для каждого эпика из `epics`:
 1. Приёмка. Задача активной стадии в `in_review` (или в «Готово», но не влитая) с веткой `t-<номер>-<слаг>`
    в комментариях агентов: свежий клон ветки, поверх — свежий `base`, проверка диффа и команды `acceptance`.
    Зелёно — ветка вливается в `base` (`--no-ff`, хвост сообщения `commit_ref`), задача уходит в «Готово».
    Красно или конфликт — комментарий лидеру сквада с хвостом лога, задача в `in_progress`; та же пара коммитов
-   ветки и base повторно не гоняется.
+   ветки и base повторно не гоняется. Полный лог без токенов — accept/<задача>-<sha>.log рядом с state.json;
+   PATH и переменные команд задают `acceptance_path` и `acceptance_env`; по таймауту убивается вся группа процессов.
 2. Стадия закрыта, когда все её задачи в «Готово» и влиты (или отменены); удалённая ветка считается влитой.
 3. Задачи первой незакрытой стадии без исполнителя назначаются скваду (назначение стартует ран). Задача с
    «**Ждёт:**» в описании ждёт ответа заказчика: конвейер её пропускает и дальше этой стадии не идёт.
@@ -31,7 +33,7 @@ multica не выдаст — сторож их снимает и перезап
 загрузка подписок, журнал действий). Комментарии в задачи пишет только при провале приёмки.
 `--dry-run` печатает решения, ничего не меняет и страницу не пишет.
 """
-import contextlib, copy, datetime as dt, fcntl, html, json, os, re, shutil, subprocess, sys, tempfile, traceback, urllib.error, urllib.request
+import contextlib, copy, datetime as dt, fcntl, html, json, os, re, shutil, signal, subprocess, sys, tempfile, time, traceback, urllib.error, urllib.request
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import control_state as control
@@ -49,6 +51,20 @@ RUNNING = control.ACTIVE - {'queued'}
 RESET_AT = re.compile(r'reset (?:at|on)\s+(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)\s*(Z\b|UTC\b|[+-]\d{2}:?\d{2})?', re.I)
 ERROR_TZ = dt.timezone(dt.timedelta(hours=8))
 EVENTS_KEEP = 400
+# Что умеет этот файл: по --capabilities внешний выкатчик решает, какие таймеры включать.
+CAPABILITIES = {'schema': 1, 'lanes': ['epics', 'providers'],
+                'features': ['accept-log', 'acceptance-env', 'accept-kill-group']}
+ACCEPT_LOG_KEEP_DAYS = 30
+KILL_GRACE = 5
+REDACTED = '[скрыто]'
+SECRET_NAME = r'[\w.-]*(?:token|secret|passw(?:or)?d|passwd|api[_-]?key|credential|private[_-]?key|authorization)[\w.-]*'
+SECRET_PATTERNS = [
+    (re.compile(r'(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}'), r'\1 ' + REDACTED),
+    (re.compile(r'(?i)\b(' + SECRET_NAME + r')(\s*[=:]\s*)("[^"\n]*"|\'[^\'\n]*\'|[^\s"\']+)'), r'\1\2' + REDACTED),
+    (re.compile(r'(?<=://)[^/\s:@]+:[^/\s@]+(?=@)'), REDACTED),
+    (re.compile(r'\b(?:gh[pousr]_|github_pat_|glpat-|sk-|xox[abp]-|npm_|AKIA)[A-Za-z0-9_-]{10,}'), REDACTED),
+    (re.compile(r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}'), REDACTED),
+]
 
 
 class AutomationPaused(Exception):
@@ -236,6 +252,46 @@ class Multica:
         return parse_json(r.stdout)
 
 
+def redact(text, secrets=()):
+    """Вырезает токены из лога приёмки: значения из конфига дословно, остальное — по виду."""
+    for value in secrets:
+        if len(value) >= 6:
+            text = text.replace(value, REDACTED)
+    for pattern, replacement in SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def run_group(cmd, cwd, env, timeout, out):
+    """Команда в своей группе процессов: по таймауту убивается вся группа, а не только shell.
+    Возвращает код выхода или None при таймауте."""
+    proc = subprocess.Popen(cmd, shell=True, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                            stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Лидер группы может выйти по TERM раньше потомков, которые TERM игнорируют, поэтому KILL шлём всей группе всегда.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGTERM)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=KILL_GRACE)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        return None
+
+
+def accept_log_dir(): return STATE.parent / 'accept'
+
+
+def prune_accept_logs(directory, now=None):
+    cutoff = (now or time.time()) - ACCEPT_LOG_KEEP_DAYS * 86400
+    for f in directory.glob('*.log'):
+        with contextlib.suppress(OSError):
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+
+
 class Repo:
     def __init__(self, path, base): self.path, self.base = path, base
 
@@ -250,27 +306,47 @@ class Repo:
     def merged(self, branch):
         return not self.head(branch) or self.git('merge-base', '--is-ancestor', branch, self.base).returncode == 0
 
-    def accept(self, branch, commands, timeout):
-        """Свежий клон ветки + свежий base + проверка диффа + команды приёмки. Возвращает (ok, причина, хвост лога)."""
+    def accept(self, branch, commands, timeout, key='', path=None, env=None):
+        """Свежий клон ветки + свежий base + проверка диффа + команды приёмки. Возвращает (ok, причина, хвост лога).
+        path/env — acceptance_path/acceptance_env из конфига: PATH приёмки не зависит от окружения юнита.
+        Полный лог без токенов — accept/<ключ>-<sha>.log рядом с state.json; хвост берётся из него же."""
         tmp = tempfile.mkdtemp(prefix='conveyor-')
+        log_path = accept_log_dir() / f'{re.sub(r"[^A-Za-z0-9._-]", "_", key or branch)}-{self.head(branch)[:12] or "nosha"}.log'
+        secrets = [str(v) for v in (env or {}).values()]
+        run_env = {**os.environ, **{k: str(v) for k, v in (env or {}).items()}}
+        if path:
+            run_env['PATH'] = path
+        header = f'# ветка {branch}, PATH={run_env.get("PATH", "")}, переменные из acceptance_env: {sorted(env or {})}\n'
+        raw = os.path.join(tmp, 'raw.log')
+
+        def finish(ok, why, extra=''):
+            text = Path(raw).read_text(errors='replace') if os.path.exists(raw) else ''
+            body = redact(header + text + (f'{extra.strip()}\n' if extra.strip() else '') + ('' if ok else f'# {why}\n'), secrets)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            prune_accept_logs(log_path.parent)
+            fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w') as f:
+                f.write(body)
+            return ok, why, body[-1500:] if ok else f'{body[-2800:]}\nполный лог: {log_path}'
+
         try:
             work = os.path.join(tmp, 'w')
             self.git('clone', '-q', '--branch', branch, self.path, work, cwd=tmp, check=True)
             if self.git('merge', '--no-edit', f'origin/{self.base}', cwd=work).returncode:
-                return False, f'конфликт с {self.base}', self.git('diff', '--name-only', '--diff-filter=U', cwd=work).stdout
+                return finish(False, f'конфликт с {self.base}', self.git('diff', '--name-only', '--diff-filter=U', cwd=work).stdout)
             diff = self.git('diff', f'origin/{self.base}', '--unified=0', '--', '.', ':(exclude)pnpm-lock.yaml', cwd=work).stdout
             bad = [m.group(0) for m in DIFF_GUARD.finditer(diff)]
             if bad:
-                return False, 'в диффе any / as unknown as / @ts-ignore / eslint-disable', '\n'.join(bad[:10])
-            log = ''
-            for cmd in commands:
-                r = subprocess.run(cmd, shell=True, cwd=work, capture_output=True, text=True, timeout=timeout)
-                log += f'$ {cmd}\n{r.stdout}{r.stderr}'
-                if r.returncode:
-                    return False, f'`{cmd}` завершилась с кодом {r.returncode}', log[-3000:]
-            return True, 'зелёно', log[-1500:]
-        except subprocess.TimeoutExpired as e:
-            return False, f'таймаут {timeout} с на `{e.cmd}`', ''
+                return finish(False, 'в диффе any / as unknown as / @ts-ignore / eslint-disable', '\n'.join(bad[:10]))
+            with open(raw, 'ab', buffering=0) as out:
+                for cmd in commands:
+                    out.write(f'$ {cmd}\n'.encode())
+                    code = run_group(cmd, work, run_env, timeout, out)
+                    if code is None:
+                        return finish(False, f'таймаут {timeout} с на `{cmd}`')
+                    if code:
+                        return finish(False, f'`{cmd}` завершилась с кодом {code}')
+            return finish(True, 'зелёно')
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -362,7 +438,8 @@ def accept_issue(m, repo, epic, issue, w):
         if w.dry:
             return False
         w.permit()
-        ok, why, tail = repo.accept(branch, epic.get('acceptance', []), epic.get('acceptance_timeout', 1500))
+        ok, why, tail = repo.accept(branch, epic.get('acceptance', []), epic.get('acceptance_timeout', 1500), key=key,
+                                    path=epic.get('acceptance_path'), env=epic.get('acceptance_env'))
         if not ok:
             w.state.setdefault(key, {})[branch] = pair
             w.log('fail', f"{epic['key']}: {key} {branch} не прошла приёмку: {why}")
@@ -964,4 +1041,7 @@ def _run(cfg, dry, providers_only):
 
 
 if __name__ == '__main__':
+    if '--capabilities' in sys.argv:
+        print(json.dumps(CAPABILITIES, sort_keys=True))
+        sys.exit(0)
     run(json.loads(CONFIG.read_text()), '--dry-run' in sys.argv, '--providers-only' in sys.argv)

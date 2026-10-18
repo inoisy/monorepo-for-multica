@@ -1,5 +1,6 @@
 import importlib.machinery, importlib.util, json, os, subprocess, tempfile, unittest
 from pathlib import Path
+from unittest.mock import patch
 
 path = str(Path(__file__).resolve().parent.parent / 'multica-conveyor')
 spec = importlib.util.spec_from_loader('conveyor', importlib.machinery.SourceFileLoader('conveyor', path))
@@ -89,6 +90,9 @@ class RepoAcceptance(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        state = patch.object(c, 'STATE', Path(self.tmp) / 'state' / 'state.json')  # логи приёмки не в боевой каталог
+        state.start()
+        self.addCleanup(state.stop)
         self.repo = os.path.join(self.tmp, 'service')
         os.mkdir(self.repo)
         for cmd in (['git', 'init', '-q', '-b', 'main'], ['git', 'config', 'user.email', 't@t'], ['git', 'config', 'user.name', 't']):
