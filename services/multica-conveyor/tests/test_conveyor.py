@@ -379,7 +379,10 @@ class Stands(unittest.TestCase):
                     return self.reply(200, {'csrfToken': 'csrf1'}, cookie='tok')
                 self.reply(202)
 
-        srv = http.server.HTTPServer(('127.0.0.1', 0), H)
+        try:
+            srv = http.server.HTTPServer(('127.0.0.1', 0), H)
+        except OSError as err:  # песочница validate без сетевых семейств сокетов
+            self.skipTest(f'локальный сокет недоступен: {err}')
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         url = f'http://127.0.0.1:{srv.server_port}'
         saved = {'cookie': 'old', 'csrf': 'x'}
