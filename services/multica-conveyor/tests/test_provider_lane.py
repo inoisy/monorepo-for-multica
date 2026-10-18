@@ -161,7 +161,7 @@ class ProviderLane(unittest.TestCase):
         self.assertEqual(result['provider_tick'], 'new')
 
     def test_retry_rechecks_runs_after_taking_shared_lock(self):
-        failed = {'id': 'failed', 'status': 'failed', 'error': 'usage limit',
+        failed = {'id': 'failed', 'status': 'failed', 'error': 'require-vless: initialize failed',
                   'created_at': '2026-01-01T00:00:00Z'}
         issue = {'identifier': 'TEST-2', 'assignee_id': 'a', 'status': 'in_progress'}
         reads = 0
@@ -206,6 +206,8 @@ class ProviderLane(unittest.TestCase):
                 return [failed]
             if args[:2] == ('issue', 'get'):
                 return {'assignee_type': 'squad', 'assignee_id': 'squad-1', 'status': 'in_progress'}
+            if args[:2] == ('squad', 'get'):
+                return {'id': 'squad-1', 'leader_id': 'a'}
             return {}
 
         with patch.object(c, 'run_stands'), patch.object(c, 'Multica', return_value=api), \
