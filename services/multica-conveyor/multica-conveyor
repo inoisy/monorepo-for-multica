@@ -12,6 +12,10 @@
    этот коммит, иначе приёмки нет, а причина видна в журнале и на странице. Проверка — отдельная задача atd
    (`--accept-job`), тик её не ждёт: клон этого коммита, поверх — зафиксированный коммит `base`, проверка диффа и
    команды `acceptance`. Одна пара коммитов — одна задача: повтор тика и перезапуск сторожа её не дублируют.
+   Вливается только задача, прошедшая маршрут: в `route` есть шаг `review`, а `step` = `close` (QA, если он в
+   маршруте, идёт до review/close) — решение Евгения 19.10.2026: в `main` вливает сторож, но только после review.
+   Маршрут ещё идёт — задача ждёт молча; дошла до `close` без review или без `route` — один раз лидеру.
+   Перед слиянием задача перечитывается: сменился коммит, маршрут или задачу отменили — не вливается.
    Зелёно — тот же коммит вливается в `base` (`--no-ff`, хвост сообщения `commit_ref`), задача уходит в «Готово».
    Красно или конфликт — комментарий исполнителю задачи (агенту из assignee; задача на скваде — лидеру) с хвостом
    лога, задача в `in_progress`; та же пара коммитов повторно не гоняется. Код 75 команды — общий ресурс занят:
@@ -76,7 +80,7 @@ EVENTS_KEEP = 400
 # Что умеет этот файл: по --capabilities внешний выкатчик решает, какие таймеры включать.
 CAPABILITIES = {'schema': 1, 'lanes': ['epics', 'providers'],
                 'features': ['accept-log', 'acceptance-env', 'accept-kill-group', 'accept-jobs', 'accept-metadata',
-                             'quota-retry-ledger', 'routes', 'route-failures']}
+                             'quota-retry-ledger', 'routes', 'route-failures', 'route-gate']}
 ACCEPT_LOG_KEEP_DAYS = 30
 KILL_GRACE = 5
 # Задача приёмки: queued — отдана atd, running/waiting — идёт (waiting — ждёт общий ресурс), остальное — итог.
@@ -277,9 +281,26 @@ def accept_target(issue, repo):
     return {'branch': branch, 'sha': sha}
 
 
+def route_gate(issue):
+    """Вливать ли по маршруту: None — можно; иначе причина. Решение Евгения 19.10.2026: сторож вливает в base сам,
+    но только после review (и QA, если он есть в маршруте) — в `route` есть шаг review, и маршрут дошёл до `close`.
+    `step` = `close` ставит только переход после pass последнего шага (или лидер руками)."""
+    meta = issue.get('metadata') or {}
+    route = parse_route(meta.get('route'))
+    if not route:
+        return 'нет `route`: вливание только после review по маршруту'
+    if 'review' not in {step for step, _ in route}:
+        return 'в `route` нет шага review: без review сторож не вливает, добавь `review:Техдиректор` перед `close`'
+    if meta.get('step') != 'close':
+        return f"маршрут не пройден: шаг `{meta.get('step')}`, вливание после `close`"
+    return None
+
+
 def mark_unmerged(issues, target_of):
     """Пометить задачи на сдаче (`in_review`) и в «Готово», чей коммит из метаданных ещё не в base: `unmerged` —
     его ветка, `accept` — что принимать. У задачи на сдаче, которую принять нельзя, — `accept_problem`.
+    Не прошла маршрут (route_gate) — `route_wait`: в приёмку не идёт, но и закрытой не считается. Пока маршрут
+    идёт, это не проблема; дошла до `close` без review или задача без `route` — `accept_problem` лидеру.
     target_of(issue) -> accept_target."""
     for i in issues:
         if not (is_done(i) or status(i) == 'in_review'):
@@ -287,6 +308,12 @@ def mark_unmerged(issues, target_of):
         target = target_of(i)
         if target and target.get('sha'):
             i['unmerged'], i['accept'] = [target['branch']], target
+            wait = route_gate(i)
+            if wait:
+                i['route_wait'] = wait
+                step = (i.get('metadata') or {}).get('step')
+                if status(i) == 'in_review' and (step == 'close' or not parse_route((i.get('metadata') or {}).get('route'))):
+                    i['accept_problem'] = wait
         elif target and status(i) == 'in_review':
             i['accept_problem'] = target['problem']
 
@@ -737,7 +764,14 @@ def report_accept_problem(m, epic, issue, w):
         return
     if notified.get(key) == problem:
         return
-    body = (f"{owner_mention(epic, issue)}приёмка {key} не началась: {problem}.\n\n"
+    if issue.get('route_wait'):
+        lead = epic.get('lead_id')
+        body = (f"{f'[@Тимлид](mention://agent/{lead}), ' if lead else ''}{key} не вливается: {problem}.\n\n"
+                "Сторож вливает в base только задачу, прошедшую review по маршруту (и QA, если он в маршруте). "
+                "Допиши в `route` недостающий шаг и верни задачу на него — после `close` приёмка пойдёт сама.")
+    else:
+        body = None
+    body = body or (f"{owner_mention(epic, issue)}приёмка {key} не началась: {problem}.\n\n"
             "Сверь итоговый отчёт, результаты QA/review и ветку исполнителя. Запиши в metadata задачи "
             "`branch` и `commit` — полный SHA из 40 символов именно сданного коммита. Ветка должна указывать "
             "на этот SHA. Если работа ещё не сдана, верни её на соответствующий шаг маршрута. "
@@ -808,6 +842,21 @@ def accept_issue(m, repo, epic, issue, w, now=None, start=True):
     if job['status'] != 'passed':
         return False
     w.permit()
+    # Проверка шла минуты: за это время задачу могли вернуть по маршруту, сменить коммит или отменить.
+    fresh = m('issue', 'get', key)
+    fresh = fresh.get('issue', fresh)
+    meta = fresh.get('metadata') or {}
+    why = ('задача отменена' if is_cancelled(fresh) else
+           'в metadata уже другой branch/commit' if (str(meta.get('branch') or '').strip() != branch or
+                                                     str(meta.get('commit') or '').strip().lower() != sha) else
+           route_gate(fresh))
+    if why:
+        problems = w.state.setdefault('_accept_problems', {})
+        if problems.get(key) != why:
+            problems[key] = why
+            w.log('wait', f"{epic['key']}: {key} {branch}@{sha[:12]} проверена, но не влита: {why}")
+        issue['accept_job'] = {'status': 'blocked', 'reason': why}
+        return False
     repo.merge(sha, branch, epic.get('commit_ref', key))
     w.log('merge', f"{epic['key']}: {key} {branch}@{sha[:12]} принята и влита в {repo.base}")
     if not is_done(issue):
@@ -924,7 +973,8 @@ def run_routes(w, workspaces):
 
 def snap_issue(i, staged=True):
     """Задача на странице; `accept` — состояние приёмки или причина, по которой её нет."""
-    acc = i.get('accept_job') or ({'status': 'blocked', 'reason': i['accept_problem']} if i.get('accept_problem') else None)
+    problem = i.get('accept_problem') or i.get('route_wait')
+    acc = i.get('accept_job') or ({'status': 'blocked', 'reason': problem} if problem else None)
     return {'key': i['identifier'], 'title': i.get('title', ''), 'status': status(i), 'assigned': bool(i.get('assignee_id')),
             'held': staged and HOLD in (i.get('description') or ''), 'unmerged': i.get('unmerged') or [], 'jobs': [],
             'accept': acc}
@@ -962,13 +1012,14 @@ def run_epic(epic, w, snapshot, frozen=False):
             if frozen or w.dry:
                 continue
             problems = w.state.setdefault('_accept_problems', {})
-            if i.get('accept_problem') and problems.get(i['identifier']) != i['accept_problem']:
-                problems[i['identifier']] = i['accept_problem']
-                w.log('wait', f"{epic['key']}: {i['identifier']} не принимается: {i['accept_problem']}")
-            elif not i.get('accept_problem'):
+            reason = i.get('accept_problem') or i.get('route_wait')
+            if reason and problems.get(i['identifier']) != reason:
+                problems[i['identifier']] = reason
+                w.log('wait', f"{epic['key']}: {i['identifier']} не принимается: {reason}")
+            elif not reason:
                 problems.pop(i['identifier'], None)
             report_accept_problem(m, epic, i, w)
-        to_accept = [] if frozen else [i for i in every if i.get('unmerged')]
+        to_accept = [] if frozen else [i for i in every if i.get('unmerged') and not i.get('route_wait')]
         if to_accept and w.publish_early:
             w.publish_early(epic_entry(epic, stages, unstaged, decide(stages)[0], frozen, {}))
         # Сначала влить готовые, потом запускать новые: слияние сдвигает base, и проверка, начатая до него,
