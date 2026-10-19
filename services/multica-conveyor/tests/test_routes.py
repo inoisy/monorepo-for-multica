@@ -91,11 +91,16 @@ class Advance(unittest.TestCase):
         self.run_routes()
         self.assertEqual(self.writes, [('issue', 'metadata', 'delete', 'EP-2', '--key', 'verdict')])
 
-    def test_последний_шаг_меняет_статус(self):
+    def test_последний_шаг_меняет_статус_без_комментария(self):
+        # Лидер уже проснулся от отчёта исполнителя (делегирование Multica), приёмку делает сторож:
+        # комментарий владельца CLI разбудил бы лидера второй раз (STT-301, 19.10.2026).
         self.issues['pass'][0]['metadata'].update(step='review')
-        self.run_routes()
+        w = self.run_routes()
+        self.assertEqual(self.bodies, [])
         self.assertIn(('issue', 'update', 'EP-2', '--status', 'in_review'), self.writes)
-        self.assertIn('mention://agent/l', self.bodies[0])
+        self.assertIn(('issue', 'metadata', 'set', 'EP-2', '--key', 'step', '--value', 'close'), self.writes)
+        self.assertEqual(self.writes[-1], ('issue', 'metadata', 'delete', 'EP-2', '--key', 'verdict'))
+        self.assertIn('шаг close', w.events[0][1])
 
 
 class RouteFailures(unittest.TestCase):

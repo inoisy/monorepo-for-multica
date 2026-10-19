@@ -914,7 +914,9 @@ def advance_route(m, w, issue, agents):
         mention = f'[@{who}](mention://agent/{agents[who]}) — ' if who in agents else (f'(«{who}» нет среди агентов) ' if who else '')
         ref = ''.join(f' {k.capitalize()} `{meta[k]}`.' for k in ('branch', 'commit') if meta.get(k))
         w.permit()
-        add_comment(m, key, f'{mention}{text}.{ref}')
+        # close — без комментария: лидер уже разбужен отчётом исполнителя, приёмку делает сторож.
+        if keys.get('step') != 'close':
+            add_comment(m, key, f'{mention}{text}.{ref}')
         if status_to:
             m('issue', 'update', key, '--status', status_to, write=True)
         for k, v in keys.items():
