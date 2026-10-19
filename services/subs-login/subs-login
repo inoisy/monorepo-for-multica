@@ -1,7 +1,7 @@
 #!/usr/bin/python3 -I
 """Вход в подписки со страницы «Подписки» Multica: статус входа аккаунтов и перелогин без ssh.
 
-Хостовый помощник (systemd, User=agents, 127.0.0.1:8099); страница ходит к нему через Caddy
+Хостовый помощник (systemd, User=agents, 127.0.0.1:8101); страница ходит к нему через Caddy
 (`handle_path /subs-login/*`). Сессию и роль проверяет по API multica той же cookie/токеном, что пришли в запросе:
 статус видят участники workspace, входит заново только owner.
 
@@ -11,7 +11,7 @@
 15 минут. Один вход на аккаунт одновременно. Значения ключей и токенов не пишутся ни в журнал, ни в ответы.
 
 Конфиг — /etc/subs-login.json (SUBS_LOGIN_CONFIG), все ключи необязательны:
-  {"listen": "127.0.0.1:8099", "multica_url": "http://127.0.0.1:8080", "subs_file": "...", "journal": "...",
+  {"listen": "127.0.0.1:8101", "multica_url": "http://127.0.0.1:8080", "subs_file": "...", "journal": "...",
    "codex": "codex", "login_timeout": 900,
    "probes": {"<provider>": {"url": "https://…", "header": "Authorization", "prefix": "Bearer "}}}
 """
@@ -23,7 +23,7 @@ from pathlib import Path
 CONFIG = Path(os.environ.get('SUBS_LOGIN_CONFIG', '/etc/subs-login.json'))
 HOME = Path.home()
 DEFAULTS = {
-    'listen': '127.0.0.1:8099',
+    'listen': '127.0.0.1:8101',
     'multica_url': 'http://127.0.0.1:8080',
     'subs_file': str(HOME / '.local/state/multica-control/subscriptions.json'),
     'journal': str(HOME / '.local/state/subs-login/journal.jsonl'),

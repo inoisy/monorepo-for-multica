@@ -24,12 +24,12 @@ install -m 0644 services/subs-login/systemd/subs-login.service /etc/systemd/syst
 systemctl daemon-reload && systemctl enable --now subs-login.service
 ```
 
-Конфиг `/etc/subs-login.json` необязателен (ключи — в docstring скрипта). Помощник слушает только `127.0.0.1:8099`;
+Конфиг `/etc/subs-login.json` необязателен (ключи — в docstring скрипта). Помощник слушает только `127.0.0.1:8101` (8099 занят `takes-site`, 8100 — `multica-pages`);
 наружу — через Caddy того же сайта, что Multica, чтобы cookie сессии доходила:
 
 ```caddy
 handle_path /subs-login/* {
-	reverse_proxy 127.0.0.1:8099
+	reverse_proxy 127.0.0.1:8101
 }
 ```
 
