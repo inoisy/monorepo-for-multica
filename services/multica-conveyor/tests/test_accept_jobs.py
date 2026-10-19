@@ -13,6 +13,9 @@ from unittest.mock import patch
 
 from test_conveyor import c, sh
 
+# Маршрут пройден: review был, задача на `close` — сторож вправе вливать.
+PASSED = {'route': 'dev:Бэкенд,qa:Тестировщик,review:Техдиректор,close:Тимлид', 'step': 'close'}
+
 
 class Fixture(unittest.TestCase):
     """Настоящий временный git-репозиторий, подменённые Multica, конфиг, пульт и каталог состояния."""
@@ -43,7 +46,7 @@ class Fixture(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.issue = {'identifier': 'EP-2', 'title': 'задача', 'status': 'in_review', 'assignee_id': 'agent',
-                      'metadata': {'branch': 't-1-x', 'commit': self.sha}}
+                      'metadata': {'branch': 't-1-x', 'commit': self.sha, **PASSED}}
         self.stages = [{'stage': 1, 'issues': [self.issue]}]
         self.unstaged = []
         self.calls, self.writes, self.launched = [], [], []
@@ -66,6 +69,9 @@ class Fixture(unittest.TestCase):
             self.writes.append(args)
         if args[:2] == ('issue', 'children'):
             return {'stages': copy.deepcopy(self.stages), 'unstaged': copy.deepcopy(self.unstaged)}
+        if args[:2] == ('issue', 'get'):
+            every = [i for st in self.stages for i in st['issues']] + self.unstaged
+            return copy.deepcopy(next((i for i in every if i['identifier'] == args[2]), {}))
         return {}
 
     def tick(self, dry=False, frozen=False):
@@ -183,7 +189,7 @@ class AcceptanceBlockers(Fixture):
 
     def test_ошибка_доставки_не_теряет_уведомление_и_не_блокирует_приёмку_другой_задачи(self):
         ready = {**copy.deepcopy(self.issue), 'identifier': 'EP-3',
-                 'metadata': {'branch': 't-1-x', 'commit': self.sha}}
+                 'metadata': {'branch': 't-1-x', 'commit': self.sha, **PASSED}}
         self.unstaged = [ready]
         self.fail_delivery = True
         with patch.object(c, 'launch_job', side_effect=self.launch_never):
@@ -212,7 +218,7 @@ class AcceptanceBlockers(Fixture):
         self.assertNotIn(self.epic['lead_id'], self.bodies[0])
 
     def test_красную_приёмку_получает_исполнитель_задача_на_скваде_лидеру(self):
-        self.issue['metadata'] = {'branch': 't-1-x', 'commit': self.sha}
+        self.issue['metadata'] = {'branch': 't-1-x', 'commit': self.sha, **PASSED}
         self.epic['acceptance'] = ['exit 3']
         self.write_config()
         self.issue.update(assignee_type='agent', assignee_id='22222222-2222-4222-8222-222222222222')
@@ -243,6 +249,107 @@ class AcceptanceBlockers(Fixture):
         self.assertEqual(len(self.comments()), 1)
 
 
+class RouteGate(Fixture):
+    """Решение 19.10.2026: в base вливается только задача, прошедшая review по маршруту (и QA, если он в маршруте)."""
+
+    def setUp(self):
+        super().setUp()
+        self.epic['lead_id'] = '11111111-1111-4111-8111-111111111111'
+        self.issue.update(assignee_type='agent', assignee_id='22222222-2222-4222-8222-222222222222')
+        self.fresh = {}
+        self.bodies = []
+        original = self.api
+
+        def api(*args, **kwargs):
+            if args[:3] == ('issue', 'comment', 'add'):
+                self.bodies.append(Path(args[args.index('--content-file') + 1]).read_text())
+            result = original(*args, **kwargs)
+            if args[:2] == ('issue', 'get') and self.fresh:
+                result['metadata'] = {**result.get('metadata', {}), **self.fresh}
+            return result
+
+        self.api = api
+        c.Multica.return_value = api
+
+    def comments(self):
+        return [a for a in self.writes if a[:3] == ('issue', 'comment', 'add')]
+
+    def test_маршрут_идёт_приёмки_нет_и_никого_не_будит(self):
+        for step in ('dev', 'qa', 'review'):
+            with self.subTest(step=step):
+                self.issue['metadata']['step'] = step
+                with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+                    _, snapshot = self.tick()
+                    self.tick()
+                self.assertEqual(self.launched, [])
+                self.assertFalse(self.merged(self.sha))
+                self.assertEqual(self.comments(), [])
+                self.assertNotIn(('issue', 'update', 'EP-2', '--status', 'done'), self.writes)
+                accept = snapshot['epics'][0]['stages'][0]['issues'][0]
+                self.assertEqual(accept['accept']['status'], 'blocked')
+                self.assertEqual(accept['unmerged'], ['t-1-x'])  # стадия не закрыта, пока код не влит
+        self.assertEqual(len(self.events('wait')), 3)  # одна запись на каждую смену причины
+
+    def test_close_без_review_не_вливается_лидеру_один_раз(self):
+        self.issue['metadata'].update(route='dev:Бэкенд,qa:Тестировщик,close:Тимлид', step='close')
+        with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+            for _ in range(3):
+                self.tick()
+        self.assertEqual(self.launched, [])
+        self.assertFalse(self.merged(self.sha))
+        self.assertEqual(len(self.comments()), 1)
+        self.assertIn('mention://agent/' + self.epic['lead_id'], self.bodies[0])
+        self.assertNotIn('22222222', self.bodies[0])
+        self.assertIn('нет шага review', self.bodies[0])
+
+    def test_без_route_не_вливается_ни_на_сдаче_ни_в_готово(self):
+        self.issue['metadata'] = {'branch': 't-1-x', 'commit': self.sha}
+        with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+            self.tick()
+            self.issue['status'] = 'done'  # лидер закрыл руками — это ещё не review
+            self.tick()
+        self.assertEqual(self.launched, [])
+        self.assertFalse(self.merged(self.sha))
+        self.assertEqual(len(self.comments()), 1)  # о задаче на сдаче; закрытую не будим
+
+    def test_после_review_и_close_вливается(self):
+        with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+            self.tick()
+            self.tick()
+        self.assertTrue(self.merged(self.sha))
+        self.assertEqual(self.comments(), [])
+
+    def test_пока_шла_проверка_задачу_вернули_по_маршруту_слияния_нет(self):
+        self.fresh = {'step': 'dev', 'round': '1'}  # список детей ещё старый, перечитанная задача — уже нет
+        with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+            self.tick()
+            self.tick()
+        self.assertEqual(self.job()['status'], 'passed')
+        self.assertFalse(self.merged(self.sha))
+        self.assertNotIn(('issue', 'update', 'EP-2', '--status', 'done'), self.writes)
+        self.assertEqual(len([e for e in self.events('wait') if 'проверена, но не влита' in e]), 1)
+        self.fresh = {}
+        with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+            self.tick()
+        self.assertTrue(self.merged(self.sha))  # маршрут снова на close — вливается без новой проверки
+        self.assertEqual(len(self.launched), 1)
+
+    def test_пока_шла_проверка_сменили_коммит_или_отменили_слияния_нет(self):
+        for fresh in ({'commit': 'f' * 40}, {'branch': 't-1-other'}):
+            with self.subTest(fresh=fresh):
+                self.fresh = fresh
+                with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+                    self.tick()
+                self.assertFalse(self.merged(self.sha))
+        self.fresh = {}
+        original = self.api
+        c.Multica.return_value = lambda *a, **k: ({**original(*a, **k), 'status': 'cancelled'}
+                                                  if a[:2] == ('issue', 'get') else original(*a, **k))
+        with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+            self.tick()
+        self.assertFalse(self.merged(self.sha))
+
+
 class AcceptJobs(Fixture):
     def test_зелёная_приёмка_вливает_ровно_проверенный_коммит(self):
         with patch.object(c, 'launch_job', side_effect=self.launch_inline):
@@ -260,7 +367,7 @@ class AcceptJobs(Fixture):
         self.assertEqual(self.job()['status'], 'passed')
         other = self.commit('t-1-y', 'y.ts')
         self.stages = [{'stage': 1, 'issues': [{**copy.deepcopy(self.issue), 'identifier': 'EP-3',
-                                                'metadata': {'branch': 't-1-y', 'commit': other}}, self.issue]}]
+                                                'metadata': {'branch': 't-1-y', 'commit': other, **PASSED}}, self.issue]}]
         with patch.object(c, 'launch_job', side_effect=self.launch_never):
             self.tick()
         self.assertTrue(self.merged(self.sha))
