@@ -41,7 +41,9 @@ multica не выдаст — сторож их снимает и перезап
 дальше передаёт сторож по `route` (пары «шаг:исполнитель»; `pos` — текущая пара): pass — упоминает следующего,
 последний шаг `close` — статус `in_review` и упоминание его исполнителя (лидера); fail — возврат ближайшему `dev` до
 текущего шага, `round` +1, на третьем круге — лидеру; blocked — лидеру. Выбор задач — фильтр metadata на сервере,
-один запрос на итог; `verdict` снимается только после доставленного упоминания.
+один запрос на итог; `verdict` снимается только после доставленного упоминания. Ран в задаче с `route` упал
+окончательно, а его никто не подхватит (не лимит и не инфраструктура — их повторяет сторож; не ран, запущенный раном
+агента, — там координатора будит Multica): полоса провайдеров один раз упоминает лидера маршрута.
 
 Страница статуса — `status_dir`: index.html и status.json каждый тик (эпики, агенты и их провайдеры,
 загрузка подписок, журнал действий). Комментарии в задачи пишет при провале приёмки и блокере её метаданных.
@@ -73,7 +75,7 @@ EVENTS_KEEP = 400
 # Что умеет этот файл: по --capabilities внешний выкатчик решает, какие таймеры включать.
 CAPABILITIES = {'schema': 1, 'lanes': ['epics', 'providers'],
                 'features': ['accept-log', 'acceptance-env', 'accept-kill-group', 'accept-jobs', 'accept-metadata',
-                             'quota-retry-ledger', 'routes']}
+                             'quota-retry-ledger', 'routes', 'route-failures']}
 ACCEPT_LOG_KEEP_DAYS = 30
 KILL_GRACE = 5
 # Задача приёмки: queued — отдана atd, running/waiting — идёт (waiting — ждёт общий ресурс), остальное — итог.
@@ -861,6 +863,43 @@ def advance_route(m, w, issue, agents):
     m('issue', 'metadata', 'delete', key, '--key', 'verdict', write=True)
 
 
+FAILURE_GRACE = dt.timedelta(minutes=5)  # платформа успевает поставить свой повтор
+FAILURES_KEEP = dt.timedelta(days=7)
+
+
+def report_route_failures(m, w, a, entry, runs, now, agent_ids):
+    """Окончательное падение рана в задаче с `route`, которое никто не подхватит, — один раз лидеру маршрута.
+    Лимит и инфраструктуру повторяет сторож; ран, запущенный раном агента, Multica сама возвращает координатору."""
+    seen = entry.setdefault('failures_reported', {})
+    since = ts(entry.setdefault('failures_since', now.isoformat()))  # историю до включения не разбираем
+    for r in runs:
+        done_at = ts(r.get('completed_at'))
+        if (r.get('status') != 'failed' or r['id'] in seen or not r.get('issue_id') or not done_at or done_at < since
+                or now - done_at < FAILURE_GRACE or is_quota_failure(r) or is_infra_failure(r)
+                or (r.get('attribution') or {}).get('delegated_from_task_id')):
+            continue
+        if any(o.get('issue_id') == r['issue_id'] and (o.get('created_at') or '') > r['created_at'] for o in runs):
+            seen[r['id']] = now.isoformat()  # уже повторили
+            continue
+        issue = m('issue', 'get', r['issue_id'])
+        issue = issue.get('issue', issue)
+        meta = issue.get('metadata') or {}
+        route = parse_route(meta.get('route'))
+        lead = route[-1][1] if route and route[-1][0] == 'close' else None
+        ids = agent_ids() if lead else {}
+        if lead not in ids or lead == a['name'] or is_done(issue) or is_cancelled(issue):
+            seen[r['id']] = now.isoformat()
+            continue
+        why = (r.get('error') or r.get('failure_reason') or 'без текста ошибки').strip()[:300]
+        add_comment(m, issue['identifier'], f"[@{lead}](mention://agent/{ids[lead]}) — ран {a['name']} на шаге "
+                    f"`{meta.get('step')}` упал, повтора не будет: {why}. Реши: повторить (`multica issue rerun`), "
+                    "передать другому или позвать человека.")
+        seen[r['id']] = now.isoformat()  # после доставки: ошибка CLI — повтор в следующем проходе
+        w.log('fail', f"{issue['identifier']}: ран {a['name']} упал ({r.get('failure_reason') or 'ошибка'}) — сообщено {lead}")
+    for rid in [k for k, v in seen.items() if now - ts(v) > FAILURES_KEEP]:
+        del seen[rid]
+
+
 def run_routes(w, workspaces):
     for ws in sorted(workspaces):
         m = Multica(ws, w.dry, w.permit)
@@ -1023,6 +1062,7 @@ def _run_providers(cfg, w, snapshot, settings):
     restore_hours, retry_minutes = pc.get('restore_hours', 5), pc.get('quota_retry_minutes', 20)
     st = w.state.setdefault('_providers', {})
     leaders = {}  # сквад → лидер, на один проход
+    names_by_ws = {}  # workspace → {имя агента: id}, лениво и на один проход
     # Цепочки из конфига и сохранённые на экране агента в Multica.
     for agent_id, a in control.agent_chains(cfg, settings).items():
         chain = a['chain']
@@ -1112,6 +1152,13 @@ def _run_providers(cfg, w, snapshot, settings):
                     entry['exhausted_logged'] = last.get('id')
                     entry['waiting'] = {'since': now.isoformat(), 'wake_at': wake.isoformat(), 'idx': wake_idx}
         record_quota_failures(entry, runs, now)
+        if not w.dry:
+            agent_ids = lambda m=m, ws=ws: names_by_ws.setdefault(ws, {
+                x['name']: x['id'] for x in items(m('agent', 'list'), 'agents') if not x.get('archived_at')})
+            try:
+                report_route_failures(m, w, a, entry, runs, now, agent_ids)
+            except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+                w.log('error', f"{a['name']}: падение рана не сообщено, повторим в следующем проходе: {str(e)[:200]}")
         rid = actual.get('runtime_id')
         # Повтор — когда профиль агента снова можно брать: после переезда, возврата или будильника, а не в остывающий
         # runtime. Ручной режим и ожидание сброса всей цепочки повторов не делают.
