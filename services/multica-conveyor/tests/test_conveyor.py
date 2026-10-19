@@ -38,6 +38,18 @@ class Decide(unittest.TestCase):
         stage, _, to_assign, held = c.decide(stages)
         self.assertEqual((stage, keys(to_assign), keys(held)), (2, ['C'], ['B']))
 
+    def test_стадия_только_с_ждущими_не_держит_следующие(self):
+        stages = [{'stage': 1, 'issues': [issue('A', 'done', 'sq'), issue('B', 'todo', 'me', desc='**Ждёт:** Time')]},
+                  {'stage': 2, 'issues': [issue('C', 'in_review', 'sq'), issue('D')]},
+                  {'stage': 3, 'issues': [issue('E')]}]
+        stage, _, to_assign, held = c.decide(stages)
+        self.assertEqual((stage, keys(to_assign), keys(held)), (2, ['D'], ['B']))
+
+    def test_остались_только_ждущие(self):
+        stages = [{'stage': 1, 'issues': [issue('B', 'todo', 'me', desc='**Ждёт:** Time')]},
+                  {'stage': 2, 'issues': [issue('C', 'done', 'sq')]}]
+        self.assertEqual(c.decide(stages)[0::2], (1, []))
+
     def test_отменённая_считается_закрытой(self):
         stages = [{'stage': 1, 'issues': [issue('A', 'cancelled')]}, {'stage': 2, 'issues': [issue('B')]}]
         self.assertEqual(keys(c.decide(stages)[2]), ['B'])

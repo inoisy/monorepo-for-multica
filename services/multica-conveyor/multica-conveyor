@@ -20,7 +20,8 @@
    процессов.
 2. Стадия закрыта, когда все её задачи в «Готово» и влиты (или отменены).
 3. Задачи первой незакрытой стадии без исполнителя назначаются скваду (назначение стартует ран). Задача с
-   «**Ждёт:**» в описании ждёт ответа заказчика: конвейер её пропускает и дальше этой стадии не идёт.
+   «**Ждёт:**» в описании ждёт ответа заказчика: конвейер её пропускает; стадия, где открыты только такие задачи,
+   следующие не держит.
 4. Инфраструктурный автоповтор задач активной стадии (см. README). Повтор после лимита провайдера здесь не делается:
    им владеет только полоса провайдеров.
 `overrides` меняют уровень рассуждения агента на время задачи и возвращают после «Готово»; ручную правку не
@@ -293,16 +294,21 @@ def mark_unmerged(issues, target_of):
 def decide(stages):
     """По стадиям эпика — что делать сейчас. Возвращает (stage, to_accept, to_assign, held):
     stage — номер активной стадии или None, если эпик закрыт; to_accept — задачи на приёмку и слияние;
-    to_assign — задачи для назначения; held — задачи, ждущие заказчика."""
+    to_assign — задачи для назначения; held — задачи, ждущие заказчика. Стадия, где открыты только ждущие,
+    следующие не держит: ответ заказчика — не повод стоять независимой работе (решение Евгения, 18.10.2026)."""
+    held, waiting_stage = [], None
     for st in sorted(stages, key=lambda s: s['stage']):
         open_ = [i for i in st['issues'] if not closed(i)]
         if not open_:
             continue
+        held += [i for i in open_ if HOLD in (i.get('description') or '')]
+        if all(i in held for i in open_):
+            waiting_stage = waiting_stage or st['stage']
+            continue
         to_accept = [i for i in open_ if i.get('unmerged')]
-        held = [i for i in open_ if HOLD in (i.get('description') or '')]
         to_assign = [i for i in open_ if not i.get('assignee_id') and i not in held]
         return st['stage'], to_accept, to_assign, held
-    return None, [], [], []
+    return waiting_stage, [], [], held
 
 
 def override_levels(stages, overrides, assigning, levels):
@@ -748,7 +754,7 @@ def report_accept_problem(m, epic, issue, w):
     w.save()  # Следующая задача/тик не должны повторять уже доставленный комментарий.
 
 
-def accept_issue(m, repo, epic, issue, w, now=None):
+def accept_issue(m, repo, epic, issue, w, now=None, start=True):
     """Приёмка задачи отдельной задачей atd и слияние по её итогу; тик проверку не ждёт. Нет задачи на эту пару
     коммитов — запустить (по одной на эпик за раз: слияние сдвигает base остальным); идёт — ждать; зелёная — влить
     ровно проверенный коммит; красная — один раз сообщить исполнителю (лидеру, если задача на скваде). True — задача влита."""
@@ -766,6 +772,8 @@ def accept_issue(m, repo, epic, issue, w, now=None):
         print(f"{epic['key']}: {key} приёмка {branch}@{sha[:12]}: {job['status'] if job else 'будет запущена'}")
         return False
     prune_jobs(jobs_dir())
+    if job is None and not start:
+        return False
     if job is None:
         others = ((p, read_job(p) or {}) for p in jobs_dir().glob('*.json') if p != path)
         busy = [p for p, other in others if other.get('epic') == epic['key'] and job_running(p, other, now)]
@@ -963,8 +971,13 @@ def run_epic(epic, w, snapshot, frozen=False):
         to_accept = [] if frozen else [i for i in every if i.get('unmerged')]
         if to_accept and w.publish_early:
             w.publish_early(epic_entry(epic, stages, unstaged, decide(stages)[0], frozen, {}))
-        for issue in to_accept:
-            accept_issue(m, repo, epic, issue, w)
+        # Сначала влить готовые, потом запускать новые: слияние сдвигает base, и проверка, начатая до него,
+        # шла бы на старом base и повторилась бы целиком.
+        merged = set()
+        for start in (False, True):
+            for issue in to_accept:
+                if issue['identifier'] not in merged and accept_issue(m, repo, epic, issue, w, start=start):
+                    merged.add(issue['identifier'])
     stage, _, to_assign, held = decide(stages)
     to_assign = to_assign[:epic.get('max_per_tick', 4)]
     overrides = [] if frozen else epic.get('overrides', [])
