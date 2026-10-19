@@ -444,6 +444,30 @@ class DetachedJob(Fixture):
         self.assertTrue(self.merged(self.sha))
         self.assertEqual(len(self.at_calls.read_text().splitlines()), 1)
 
+    def test_временный_каталог_запустившего_рана_не_нужен_проверке(self):
+        # Тик вручную из рана агента: atd сохраняет его TMPDIR, а демон удаляет этот каталог по концу рана.
+        run_tmp = self.tmp / 'multica-task-1'
+        run_tmp.mkdir()
+        self.epic['acceptance'] = ['sleep 2', 'test -f x.ts']
+        self.write_config()
+        with patch.dict(os.environ, {'TMPDIR': str(run_tmp), 'TMP': str(run_tmp), 'TEMP': str(run_tmp)}):
+            self.tick()
+        time.sleep(1)
+        subprocess.run(['rm', '-rf', str(run_tmp)], check=True)
+        job = self.wait_final()
+        self.assertEqual(job['status'], 'passed', job.get('reason'))
+
+    def test_задача_atd_не_наследует_временный_каталог_и_cwd_рана(self):
+        path = c.jobs_dir() / 'EP-2-abc.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        done = subprocess.CompletedProcess(['at', 'now'], 0, '', 'job 9 at now\n')
+        with patch.dict(os.environ, {'TMPDIR': '/tmp/multica-task-1', 'TMP': '/x', 'TEMP': '/x'}), \
+                patch.object(c.subprocess, 'run', return_value=done) as run:
+            self.assertEqual(c.launch_job(path), '9')
+        kw = run.call_args.kwargs
+        self.assertFalse({'TMPDIR', 'TMP', 'TEMP'} & set(kw['env']))
+        self.assertEqual(kw['cwd'], str(path.parent))
+
 
 if __name__ == '__main__':
     unittest.main()
