@@ -254,6 +254,19 @@ class AcceptJobs(Fixture):
         self.assertIn(f"Merge branch 't-1-x'. REF-1", subprocess.run(['git', '-C', str(self.repo), 'log', '-1', '--format=%s'],
                                                                      capture_output=True, text=True).stdout)
 
+    def test_новая_проверка_стартует_после_слияния_готовой(self):
+        with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+            self.tick()
+        self.assertEqual(self.job()['status'], 'passed')
+        other = self.commit('t-1-y', 'y.ts')
+        self.stages = [{'stage': 1, 'issues': [{**copy.deepcopy(self.issue), 'identifier': 'EP-3',
+                                                'metadata': {'branch': 't-1-y', 'commit': other}}, self.issue]}]
+        with patch.object(c, 'launch_job', side_effect=self.launch_never):
+            self.tick()
+        self.assertTrue(self.merged(self.sha))
+        started = [c.read_job(p) for p in self.launched if p.name.startswith('EP-3')]
+        self.assertEqual([j['base_sha'] for j in started], [self.head('main')])
+
     def test_повтор_тика_и_перезапуск_сторожа_не_дублируют_задачу(self):
         with patch.object(c, 'launch_job', side_effect=self.launch_never):
             for _ in range(3):
