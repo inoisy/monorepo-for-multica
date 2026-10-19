@@ -204,6 +204,35 @@ class AcceptanceBlockers(Fixture):
         self.tick()
         self.assertEqual(len(self.comments()), 1)
 
+    def test_блокер_получает_исполнитель_задачи_а_не_лидер(self):
+        self.issue.update(assignee_type='agent', assignee_id='22222222-2222-4222-8222-222222222222')
+        self.tick()
+        self.assertEqual(len(self.comments()), 1)
+        self.assertIn('mention://agent/22222222-2222-4222-8222-222222222222', self.bodies[0])
+        self.assertNotIn(self.epic['lead_id'], self.bodies[0])
+
+    def test_красную_приёмку_получает_исполнитель_задача_на_скваде_лидеру(self):
+        self.issue['metadata'] = {'branch': 't-1-x', 'commit': self.sha}
+        self.epic['acceptance'] = ['exit 3']
+        self.write_config()
+        self.issue.update(assignee_type='agent', assignee_id='22222222-2222-4222-8222-222222222222')
+        with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+            self.tick()
+            self.tick()
+        self.assertEqual(len(self.comments()), 1)
+        self.assertIn('mention://agent/22222222-2222-4222-8222-222222222222', self.bodies[0])
+        self.assertIn('metadata `commit`', self.bodies[0])
+        self.assertNotIn(self.epic['lead_id'], self.bodies[0])
+        self.assertIn(('issue', 'update', 'EP-2', '--status', 'in_progress'), self.writes)
+
+        squad = {**copy.deepcopy(self.issue), 'identifier': 'EP-3', 'assignee_type': 'squad', 'assignee_id': 'squad'}
+        self.stages = [{'stage': 1, 'issues': [squad]}]
+        with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+            self.tick()
+            self.tick()
+        self.assertEqual(len(self.comments()), 2)
+        self.assertIn('mention://agent/' + self.epic['lead_id'], self.bodies[1])
+
     def test_без_этапа_тоже_сообщается_а_закрытая_задача_не_будится(self):
         self.stages = []
         self.unstaged = [self.issue]
