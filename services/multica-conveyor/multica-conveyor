@@ -71,7 +71,10 @@ QUOTA = re.compile(r'usage limit|spend limit|rate.?limit|hit your .{0,20}limit|q
 INFRA = re.compile(r'require-vless|initialize failed|handshake timeout|daemon restarted|routing discovery failed|'
                    r'control protocol failed|process exited|timed? ?out\b|ETIMEDOUT|ECONNRESET|ECONNREFUSED|'
                    r'connection (?:reset|refused)', re.I)
-ACTIVE_RUN = {'queued', 'running', 'dispatched', 'pending'}
+# waiting_local_directory — ран ждёт свободный каталог на демоне: работа уже взята, второй исполнитель не нужен.
+ACTIVE_RUN = {'queued', 'running', 'dispatched', 'pending', 'preparing', 'waiting_local_directory'}
+# Сколько ждать, пока сервер покажет назначение с неизвестным исходом, прежде чем назначить снова.
+DISPATCH_SETTLE_MINUTES = 10
 RUNNING = control.ACTIVE - {'queued'}
 # «Your limit will reset at 2026-10-19 13:34:35» — z.ai пишет время сброса по Пекину и без пояса.
 RESET_AT = re.compile(r'reset (?:at|on)\s+(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)\s*(Z\b|UTC\b|[+-]\d{2}:?\d{2})?', re.I)
@@ -991,6 +994,43 @@ def epic_entry(epic, stages, unstaged, stage, frozen, snap_issues):
             'unstaged': [snap_issue(i, staged=False) for i in unstaged]}
 
 
+def dispatch_issue(m, epic, stage, issue, w, now):
+    """Назначить задачу скваду, если по ней никто не работает. Список детей читается в начале тика, а приёмка
+    идёт до 25 минут — поэтому перед записью задача и её раны перечитываются. Блокирует только сама задача:
+    раны и будильники соседних задач эпика не мешают.
+    Журнал намерения `_dispatch` привязан к ревизии задачи: назначение видно — запись снимается; ревизия
+    сменилась, а исполнителя нет — задачу вернули, назначаем заново; ревизия та же — исход прошлой записи
+    неизвестен, ждём DISPATCH_SETTLE_MINUTES и только потом повторяем."""
+    key = issue['identifier']
+    fresh = m('issue', 'get', key)
+    fresh = fresh.get('issue', fresh)
+    journal = w.state.setdefault('_dispatch', {})
+    intent = journal.get(key)
+    if fresh.get('assignee_id') or closed(fresh) or HOLD in (fresh.get('description') or ''):
+        if intent and not w.dry:
+            journal.pop(key)
+        return
+    if intent and intent.get('revision') == fresh.get('revision') and \
+            now - ts(intent['at']) < dt.timedelta(minutes=DISPATCH_SETTLE_MINUTES):
+        print(f"{epic['key']}: {key} назначение отправлено в {intent['at'][11:16]}, сервер его ещё не показал — ждём")
+        return
+    runs = items(m('issue', 'runs', key), 'runs')
+    if any(r.get('status') in ACTIVE_RUN for r in runs):
+        print(f"{epic['key']}: {key} без исполнителя, но по ней идёт ран — не назначаю")
+        return
+    w.log('assign', f"{epic['key']}: стадия {stage}, {key} → сквад")
+    if w.dry:
+        return
+    w.permit()
+    journal[key] = {'revision': fresh.get('revision'), 'at': now.isoformat()}
+    w.save()
+    # Статус и исполнитель — две записи: у `issue update --assignee-id` старт рана не проверен, а у `assign`
+    # он штатный. Сорвётся вторая — ревизия уже сменилась, следующий тик назначит без ожидания.
+    if status(fresh) in ('backlog', None):
+        m('issue', 'update', key, '--status', 'todo', write=True)
+    m('issue', 'assign', key, '--to-id', epic['squad_id'], write=True)
+
+
 def run_epic(epic, w, snapshot, frozen=False):
     """frozen — цель на паузе: только читаем для снимка, ничего не назначаем, не повторяем и не сливаем."""
     m = Multica(epic['workspace'], w.dry, w.permit)
@@ -1091,11 +1131,13 @@ def run_epic(epic, w, snapshot, frozen=False):
                     w.log('fail', f"{epic['key']}: {key} — {mem.get('n', 0)} повтора подряд упали на инфраструктуре, жду человека")
                     if not w.dry:
                         infra[key] = {**mem, 'gave_up': True}
+    if not frozen and not w.dry:
+        journal = w.state.setdefault('_dispatch', {})
+        for i in [i for st in stages for i in st['issues']] + unstaged:
+            if i['identifier'] in journal and (i.get('assignee_id') or closed(i)):
+                del journal[i['identifier']]
     for issue in [] if frozen else to_assign:
-        w.log('assign', f"{epic['key']}: стадия {stage}, {issue['identifier']} → сквад")
-        if status(issue) in ('backlog', None):
-            m('issue', 'update', issue['identifier'], '--status', 'todo', write=True)
-        m('issue', 'assign', issue['identifier'], '--to-id', epic['squad_id'], write=True)
+        dispatch_issue(m, epic, stage, issue, w, now)
 
 
 def apply_profile(m, agent_id, p):
