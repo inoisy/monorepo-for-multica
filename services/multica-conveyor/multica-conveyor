@@ -13,10 +13,11 @@
    (`--accept-job`), тик её не ждёт: клон этого коммита, поверх — зафиксированный коммит `base`, проверка диффа и
    команды `acceptance`. Одна пара коммитов — одна задача: повтор тика и перезапуск сторожа её не дублируют.
    Зелёно — тот же коммит вливается в `base` (`--no-ff`, хвост сообщения `commit_ref`), задача уходит в «Готово».
-   Красно или конфликт — комментарий лидеру сквада с хвостом лога, задача в `in_progress`; та же пара коммитов
-   повторно не гоняется. Код 75 команды — общий ресурс занят: задача ждёт и повторяет команду, ожидание не входит в
-   `acceptance_timeout`; не дождалась — приёмка отложена, а не провалена. Полный лог без токенов —
-   accept/<задача>-<sha>.log рядом с state.json; по таймауту убивается вся группа процессов.
+   Красно или конфликт — комментарий исполнителю задачи (агенту из assignee; задача на скваде — лидеру) с хвостом
+   лога, задача в `in_progress`; та же пара коммитов повторно не гоняется. Код 75 команды — общий ресурс занят:
+   задача ждёт и повторяет команду, ожидание не входит в `acceptance_timeout`; не дождалась — приёмка отложена, а не
+   провалена. Полный лог без токенов — accept/<задача>-<sha>.log рядом с state.json; по таймауту убивается вся группа
+   процессов.
 2. Стадия закрыта, когда все её задачи в «Готово» и влиты (или отменены).
 3. Задачи первой незакрытой стадии без исполнителя назначаются скваду (назначение стартует ран). Задача с
    «**Ждёт:**» в описании ждёт ответа заказчика: конвейер её пропускает и дальше этой стадии не идёт.
@@ -683,13 +684,22 @@ def run_job(path):
                  reason=f'сбой проверки: {e}'[:300])
 
 
-def report_failure(m, epic, repo, key, branch, why, tail):
-    lead = epic.get('lead_id')
-    mention = f"[@Тимлид](mention://agent/{lead}), " if lead else ''
+def owner_mention(epic, issue):
+    """Кого будить по проблеме приёмки: агента-исполнителя задачи — он знает свою ветку и правку; задача на скваде
+    или без исполнителя — лидера. Лишний переход через лидера стоил часов, когда тот стоял на лимите."""
+    agent, lead = issue.get('assignee_id'), epic.get('lead_id')
+    if issue.get('assignee_type') == 'agent' and agent and agent != lead:
+        return f"[@исполнитель](mention://agent/{agent}), "
+    return f"[@Тимлид](mention://agent/{lead}), " if lead else ''
+
+
+def report_failure(m, epic, repo, issue, branch, why, tail):
+    key = issue['identifier']
     cmds = ', '.join(f'`{c}`' for c in epic.get('acceptance', []))
-    body = (f"{mention}автоприёмка конвейера не прошла: ветка `{branch}`, {why}. Приёмка — свежий клон ветки поверх "
-            f"свежего `{repo.base}`, проверка диффа, затем {cmds}. Почини и верни задачу в `in_review` — конвейер "
-            f"примет и вольёт сам.\n\n```\n{tail.strip()[-2500:]}\n```")
+    body = (f"{owner_mention(epic, issue)}автоприёмка конвейера не прошла: ветка `{branch}`, {why}. Приёмка — свежий "
+            f"клон ветки поверх свежего `{repo.base}`, проверка диффа, затем {cmds}. Почини в той же ветке, запиши "
+            f"новый полный SHA в metadata `commit` и верни задачу в `in_review` — конвейер примет и вольёт сам."
+            f"\n\n```\n{tail.strip()[-2500:]}\n```")
     fd, path = tempfile.mkstemp(suffix='.md')
     os.write(fd, body.encode())
     os.close(fd)
@@ -711,9 +721,7 @@ def report_accept_problem(m, epic, issue, w):
         return
     if notified.get(key) == problem:
         return
-    lead = epic.get('lead_id')
-    mention = f"[@Тимлид](mention://agent/{lead}), " if lead else ''
-    body = (f"{mention}приёмка {key} не началась: {problem}.\n\n"
+    body = (f"{owner_mention(epic, issue)}приёмка {key} не началась: {problem}.\n\n"
             "Сверь итоговый отчёт, результаты QA/review и ветку исполнителя. Запиши в metadata задачи "
             "`branch` и `commit` — полный SHA из 40 символов именно сданного коммита. Ветка должна указывать "
             "на этот SHA. Если работа ещё не сдана, верни её на соответствующий шаг маршрута. "
@@ -736,7 +744,7 @@ def report_accept_problem(m, epic, issue, w):
 def accept_issue(m, repo, epic, issue, w, now=None):
     """Приёмка задачи отдельной задачей atd и слияние по её итогу; тик проверку не ждёт. Нет задачи на эту пару
     коммитов — запустить (по одной на эпик за раз: слияние сдвигает base остальным); идёт — ждать; зелёная — влить
-    ровно проверенный коммит; красная — один раз сообщить лидеру. True — задача влита."""
+    ровно проверенный коммит; красная — один раз сообщить исполнителю (лидеру, если задача на скваде). True — задача влита."""
     key, branch, sha = issue['identifier'], issue['accept']['branch'], issue['accept']['sha']
     base_sha = repo.head(repo.base)
     pair = f'{sha}+{base_sha}'
@@ -779,7 +787,7 @@ def accept_issue(m, repo, epic, issue, w, now=None):
         w.state.setdefault(key, {})[branch] = pair
         w.log('fail', f"{epic['key']}: {key} {branch}@{sha[:12]} не прошла приёмку: {job.get('reason')}")
         w.save()
-        report_failure(m, epic, repo, key, branch, job.get('reason') or 'провал', job.get('tail') or '')
+        report_failure(m, epic, repo, issue, branch, job.get('reason') or 'провал', job.get('tail') or '')
         job['reported'] = True
         write_job(path, job)
     if job['status'] != 'passed':
