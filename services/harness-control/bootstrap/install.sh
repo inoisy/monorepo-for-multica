@@ -116,7 +116,7 @@ if [[ ! -e /usr/local/lib/harness-canary/canary.py ]]; then
 fi
 run systemctl daemon-reload
 run systemctl enable harness-control-recover.service
-run systemctl enable --now harness-canary.timer
+echo '  (harness-canary.timer ставится выключенным: проверка вручную, расписание включает оператор на время проверки)'
 echo '  (multica-provider.timer ставится выключенным: его включает harness-control по --capabilities артефакта)'
 
 # --- baseline: текущие установленные файлы, чтобы откат был с первого дня ---------------------

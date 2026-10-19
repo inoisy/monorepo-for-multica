@@ -56,6 +56,7 @@ bash services/harness-control/bootstrap/install.sh --check
    он безопасен для старого сторожа, но несовместим с новыми карточками текущего пульта; не считать его
    полноценным восстановлением пульта без отдельной проверки карточек. Не выполнять ручную замену root-файлов.
 7. Canary validate/deploy/rollback/auto-rollback уже подтверждены; повторять их только при изменении этого пути.
+   Расписание канарейки выключено (см. README, «Harness-canary: ручная проверка»): для deploy-проверки таймер включает оператор.
 
 Для проверки исправленного адаптера без замены root-кода запускать `services/harness-control/bin/harness-control`
 и `services/harness-control/bin/harness-control-mcp` из проверенного SHA. Они вызывают тот же установленный

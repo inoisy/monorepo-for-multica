@@ -69,6 +69,11 @@ class Scripts(unittest.TestCase):
         self.assertNotRegex(plan, r'enable[^\n]*multica-provider')
         self.assertIn('multica-provider.timer ставится выключенным', plan)
 
+    def test_таймер_canary_ставится_выключенным(self):
+        plan = check_output().stdout
+        self.assertNotRegex(plan, r'enable[^\n]*harness-canary')
+        self.assertIn('harness-canary.timer ставится выключенным', plan)
+
     def test_provider_units_запускают_тот_же_сторож(self):
         text = (PKG.parent / 'multica-conveyor' / 'systemd' / 'multica-provider.service').read_text()
         self.assertIn('ExecStart=/usr/local/bin/multica-conveyor --providers-only', text)
