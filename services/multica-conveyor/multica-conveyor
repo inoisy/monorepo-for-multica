@@ -37,7 +37,7 @@
 multica не выдаст — сторож их снимает и перезапускает задачу на новом.
 
 Страница статуса — `status_dir`: index.html и status.json каждый тик (эпики, агенты и их провайдеры,
-загрузка подписок, журнал действий). Комментарии в задачи пишет только при провале приёмки.
+загрузка подписок, журнал действий). Комментарии в задачи пишет при провале приёмки и блокере её метаданных.
 `--dry-run` печатает решения, ничего не меняет и страницу не пишет.
 """
 import contextlib, copy, datetime as dt, fcntl, html, json, os, re, shlex, shutil, signal, subprocess, sys, tempfile, time, traceback, urllib.error, urllib.request
@@ -697,6 +697,38 @@ def report_failure(m, epic, repo, key, branch, why, tail):
     m('issue', 'update', key, '--status', 'in_progress', write=True)
 
 
+def report_accept_problem(m, epic, issue, w):
+    """Запись в журнале не будит владельца. Доставить блокер отдельно и помнить успешную доставку
+    между тиками; ошибка CLI не должна ни терять уведомление, ни останавливать приёмку остальных задач."""
+    key, problem = issue['identifier'], issue.get('accept_problem')
+    notified = w.state.setdefault('_accept_notified', {})
+    if not problem:
+        notified.pop(key, None)
+        return
+    if notified.get(key) == problem:
+        return
+    lead = epic.get('lead_id')
+    mention = f"[@Тимлид](mention://agent/{lead}), " if lead else ''
+    body = (f"{mention}приёмка {key} не началась: {problem}.\n\n"
+            "Сверь итоговый отчёт, результаты QA/review и ветку исполнителя. Запиши в metadata задачи "
+            "`branch` и `commit` — полный SHA из 40 символов именно сданного коммита. Ветка должна указывать "
+            "на этот SHA. Если работа ещё не сдана, верни её на соответствующий шаг маршрута. "
+            "Сторож не угадывает ветку по комментариям и не меняет статус из-за неполных метаданных. "
+            "После исправления приёмка продолжится в следующем тике.")
+    w.permit()
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', encoding='utf-8') as content:
+        content.write(body)
+        content.flush()
+        try:
+            m('issue', 'comment', 'add', key, '--content-file', content.name, '--allow-external-file', write=True)
+        except (RuntimeError, subprocess.TimeoutExpired, OSError):
+            # Не логировать сырой ответ CLI: он может содержать credentials.
+            w.log('wait', f"{epic['key']}: {key} — уведомление о блокере приёмки не доставлено, повторим в следующем тике")
+            return
+    notified[key] = problem
+    w.save()  # Следующая задача/тик не должны повторять уже доставленный комментарий.
+
+
 def accept_issue(m, repo, epic, issue, w, now=None):
     """Приёмка задачи отдельной задачей atd и слияние по её итогу; тик проверку не ждёт. Нет задачи на эту пару
     коммитов — запустить (по одной на эпик за раз: слияние сдвигает base остальным); идёт — ждать; зелёная — влить
@@ -793,16 +825,17 @@ def run_epic(epic, w, snapshot, frozen=False):
         # Приёмка не зависит от этапа: любая подзадача на сдаче, в том числе без этапа.
         every = [i for st in stages for i in st['issues']] + unstaged
         mark_unmerged(every, lambda i: accept_target(i, repo))
-        problems = w.state.setdefault('_accept_problems', {})
         for i in every:
             # Причина, по которой задачу на сдаче нельзя принять, — в журнал один раз, пока она не сменится.
             if frozen or w.dry:
                 continue
+            problems = w.state.setdefault('_accept_problems', {})
             if i.get('accept_problem') and problems.get(i['identifier']) != i['accept_problem']:
                 problems[i['identifier']] = i['accept_problem']
                 w.log('wait', f"{epic['key']}: {i['identifier']} не принимается: {i['accept_problem']}")
             elif not i.get('accept_problem'):
                 problems.pop(i['identifier'], None)
+            report_accept_problem(m, epic, i, w)
         to_accept = [] if frozen else [i for i in every if i.get('unmerged')]
         if to_accept and w.publish_early:
             w.publish_early(epic_entry(epic, stages, unstaged, decide(stages)[0], frozen, {}))

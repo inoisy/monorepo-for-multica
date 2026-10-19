@@ -68,10 +68,10 @@ class Fixture(unittest.TestCase):
             return {'stages': copy.deepcopy(self.stages), 'unstaged': copy.deepcopy(self.unstaged)}
         return {}
 
-    def tick(self, dry=False):
+    def tick(self, dry=False, frozen=False):
         w = c.Watch(dry)
         snapshot = {'epics': []}
-        c.run_epic(self.epic, w, snapshot)
+        c.run_epic(self.epic, w, snapshot, frozen=frozen)
         w.save()
         return w, snapshot
 
@@ -133,6 +133,85 @@ class AcceptTarget(Fixture):
     def test_влитый_коммит_принимать_нечего(self):
         sh(self.repo, 'git', 'merge', '-q', '--no-ff', 't-1-x', '-m', 'merge')
         self.assertIsNone(c.accept_target(self.issue, c.Repo(str(self.repo), 'main')))
+
+
+class AcceptanceBlockers(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.issue['metadata'] = {}
+        self.epic['lead_id'] = '11111111-1111-4111-8111-111111111111'
+        self.bodies = []
+        self.fail_delivery = False
+        original = self.api
+
+        def api(*args, **kwargs):
+            if args[:3] == ('issue', 'comment', 'add'):
+                self.bodies.append(Path(args[args.index('--content-file') + 1]).read_text())
+                if self.fail_delivery:
+                    raise RuntimeError('CLI недоступен')
+            return original(*args, **kwargs)
+
+        self.api = api
+        c.Multica.return_value = api
+
+    def comments(self):
+        return [a for a in self.writes if a[:3] == ('issue', 'comment', 'add')]
+
+    def test_старый_блокер_из_журнала_доставляется_лидеру_один_раз(self):
+        # Состояние после обновления: причина уже записана, но никому не доставлена.
+        self.state.write_text(json.dumps({'_accept_problems': {'EP-2': 'в метаданных задачи нет branch и commit'}}))
+        self.tick()
+        self.tick()  # новый Watch читает сохранённое состояние после перезапуска
+        self.assertEqual(len(self.comments()), 1)
+        self.assertIn('mention://agent/' + self.epic['lead_id'], self.bodies[0])
+        self.assertIn('branch', self.bodies[0])
+        self.assertIn('commit', self.bodies[0])
+        self.assertFalse(any(a[:2] == ('issue', 'update') for a in self.writes))
+        self.assertFalse(self.merged(self.sha))
+
+    def test_смена_причины_и_повторное_возникновение_сообщаются(self):
+        self.tick()
+        self.issue['metadata'] = {'branch': 't-1-x', 'commit': 'f' * 40}
+        self.tick()
+        self.tick()
+        self.assertEqual(len(self.comments()), 2)
+        self.issue['status'] = 'in_progress'
+        self.tick()  # сняли со сдачи, инцидент завершён
+        self.issue['status'] = 'in_review'
+        self.tick()
+        self.assertEqual(len(self.comments()), 3)
+
+    def test_ошибка_доставки_не_теряет_уведомление_и_не_блокирует_приёмку_другой_задачи(self):
+        ready = {**copy.deepcopy(self.issue), 'identifier': 'EP-3',
+                 'metadata': {'branch': 't-1-x', 'commit': self.sha}}
+        self.unstaged = [ready]
+        self.fail_delivery = True
+        with patch.object(c, 'launch_job', side_effect=self.launch_never):
+            self.tick()
+        self.assertEqual(len(self.launched), 1)
+        self.assertEqual(self.comments(), [])
+        self.fail_delivery = False
+        with patch.object(c, 'launch_job', side_effect=self.launch_never):
+            self.tick()
+            self.tick()
+        self.assertEqual(len(self.comments()), 1)
+        self.assertEqual(len(self.bodies), 2)
+
+    def test_пауза_и_dry_run_не_отправляют_и_не_помечают_уведомление(self):
+        self.tick(dry=True)
+        self.tick(frozen=True)
+        self.assertEqual(self.writes, [])
+        self.tick()
+        self.assertEqual(len(self.comments()), 1)
+
+    def test_без_этапа_тоже_сообщается_а_закрытая_задача_не_будится(self):
+        self.stages = []
+        self.unstaged = [self.issue]
+        self.tick()
+        self.assertEqual(len(self.comments()), 1)
+        self.issue.update(status='done', metadata={'branch': 't-1-x'})
+        self.tick()
+        self.assertEqual(len(self.comments()), 1)
 
 
 class AcceptJobs(Fixture):
