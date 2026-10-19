@@ -12,9 +12,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from test_conveyor import c, sh
+from test_server_route import conveyor
 
-# Маршрут пройден: review был, задача на `close` — сторож вправе вливать.
-PASSED = {'route': 'dev:Бэкенд,qa:Тестировщик,review:Техдиректор,close:Тимлид', 'step': 'close'}
+# Серверный маршрут пройден: review был, маршрут завершён на `close` — сторож вправе вливать.
+PASSED = conveyor()
 
 
 class Fixture(unittest.TestCase):
@@ -46,10 +47,12 @@ class Fixture(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.issue = {'identifier': 'EP-2', 'title': 'задача', 'status': 'in_review', 'assignee_id': 'agent',
-                      'metadata': {'branch': 't-1-x', 'commit': self.sha, **PASSED}}
+                      'metadata': {'branch': 't-1-x', 'commit': self.sha}}
         self.stages = [{'stage': 1, 'issues': [self.issue]}]
         self.unstaged = []
         self.calls, self.writes, self.launched = [], [], []
+        # Серверный маршрут по задаче; нет ключа — пройденный, None — маршрута нет (CLI отвечает 404).
+        self.conveyors = {}
 
     def write_config(self):
         self.config.write_text(json.dumps({'epics': [self.epic]}))
@@ -67,6 +70,11 @@ class Fixture(unittest.TestCase):
         self.calls.append(args)
         if kwargs.get('write'):
             self.writes.append(args)
+        if args[:3] == ('issue', 'conveyor', 'get'):
+            cv = self.conveyors.get(args[3], PASSED)
+            if cv is None:
+                raise RuntimeError('multica issue conveyor get: no route on this issue')
+            return copy.deepcopy(cv)
         if args[:2] == ('issue', 'children'):
             return {'stages': copy.deepcopy(self.stages), 'unstaged': copy.deepcopy(self.unstaged)}
         if args[:2] == ('issue', 'get'):
@@ -189,7 +197,7 @@ class AcceptanceBlockers(Fixture):
 
     def test_ошибка_доставки_не_теряет_уведомление_и_не_блокирует_приёмку_другой_задачи(self):
         ready = {**copy.deepcopy(self.issue), 'identifier': 'EP-3',
-                 'metadata': {'branch': 't-1-x', 'commit': self.sha, **PASSED}}
+                 'metadata': {'branch': 't-1-x', 'commit': self.sha}}
         self.unstaged = [ready]
         self.fail_delivery = True
         with patch.object(c, 'launch_job', side_effect=self.launch_never):
@@ -218,7 +226,7 @@ class AcceptanceBlockers(Fixture):
         self.assertNotIn(self.epic['lead_id'], self.bodies[0])
 
     def test_красную_приёмку_получает_исполнитель_задача_на_скваде_лидеру(self):
-        self.issue['metadata'] = {'branch': 't-1-x', 'commit': self.sha, **PASSED}
+        self.issue['metadata'] = {'branch': 't-1-x', 'commit': self.sha}
         self.epic['acceptance'] = ['exit 3']
         self.write_config()
         self.issue.update(assignee_type='agent', assignee_id='22222222-2222-4222-8222-222222222222')
@@ -250,23 +258,25 @@ class AcceptanceBlockers(Fixture):
 
 
 class RouteGate(Fixture):
-    """Решение 19.10.2026: в base вливается только задача, прошедшая review по маршруту (и QA, если он в маршруте)."""
+    """Решение 19.10.2026: в base вливается только задача, прошедшая review по серверному маршруту Multica."""
 
     def setUp(self):
         super().setUp()
         self.epic['lead_id'] = '11111111-1111-4111-8111-111111111111'
         self.issue.update(assignee_type='agent', assignee_id='22222222-2222-4222-8222-222222222222')
-        self.fresh = {}
         self.bodies = []
+        self.reads = 0
+        self.later = None  # (с какого чтения маршрута, какой маршрут) — маршрут сменился, пока шла проверка
         original = self.api
 
         def api(*args, **kwargs):
             if args[:3] == ('issue', 'comment', 'add'):
                 self.bodies.append(Path(args[args.index('--content-file') + 1]).read_text())
-            result = original(*args, **kwargs)
-            if args[:2] == ('issue', 'get') and self.fresh:
-                result['metadata'] = {**result.get('metadata', {}), **self.fresh}
-            return result
+            if args[:3] == ('issue', 'conveyor', 'get'):
+                self.reads += 1
+                if self.later and self.reads >= self.later[0]:
+                    return copy.deepcopy(self.later[1])
+            return original(*args, **kwargs)
 
         self.api = api
         c.Multica.return_value = api
@@ -275,9 +285,9 @@ class RouteGate(Fixture):
         return [a for a in self.writes if a[:3] == ('issue', 'comment', 'add')]
 
     def test_маршрут_идёт_приёмки_нет_и_никого_не_будит(self):
-        for step in ('dev', 'qa', 'review'):
-            with self.subTest(step=step):
-                self.issue['metadata']['step'] = step
+        for step, st in (('dev', 'active'), ('qa', 'active'), ('review', 'waiting_provider'), ('dev', 'awaiting_coordinator')):
+            with self.subTest(step=step, status=st):
+                self.conveyors['EP-2'] = conveyor(at=step, status=st)
                 with patch.object(c, 'launch_job', side_effect=self.launch_inline):
                     _, snapshot = self.tick()
                     self.tick()
@@ -288,10 +298,19 @@ class RouteGate(Fixture):
                 accept = snapshot['epics'][0]['stages'][0]['issues'][0]
                 self.assertEqual(accept['accept']['status'], 'blocked')
                 self.assertEqual(accept['unmerged'], ['t-1-x'])  # стадия не закрыта, пока код не влит
-        self.assertEqual(len(self.events('wait')), 3)  # одна запись на каждую смену причины
+        self.assertEqual(len(self.events('wait')), 4)  # одна запись на каждую смену причины
+
+    def test_metadata_route_не_заменяет_серверный_маршрут(self):
+        self.issue['metadata'].update(route='dev:Бэкенд,review:Техдиректор,close:Тимлид', step='close')
+        self.conveyors['EP-2'] = conveyor(at='dev', status='active')
+        with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+            self.tick()
+            self.tick()
+        self.assertEqual(self.launched, [])
+        self.assertFalse(self.merged(self.sha))
 
     def test_close_без_review_не_вливается_лидеру_один_раз(self):
-        self.issue['metadata'].update(route='dev:Бэкенд,qa:Тестировщик,close:Тимлид', step='close')
+        self.conveyors['EP-2'] = conveyor('dev,qa,close')
         with patch.object(c, 'launch_job', side_effect=self.launch_inline):
             for _ in range(3):
                 self.tick()
@@ -302,8 +321,8 @@ class RouteGate(Fixture):
         self.assertNotIn('22222222', self.bodies[0])
         self.assertIn('нет шага review', self.bodies[0])
 
-    def test_без_route_не_вливается_ни_на_сдаче_ни_в_готово(self):
-        self.issue['metadata'] = {'branch': 't-1-x', 'commit': self.sha}
+    def test_без_маршрута_не_вливается_ни_на_сдаче_ни_в_готово(self):
+        self.conveyors['EP-2'] = None
         with patch.object(c, 'launch_job', side_effect=self.launch_inline):
             self.tick()
             self.issue['status'] = 'done'  # лидер закрыл руками — это ещё не review
@@ -311,6 +330,22 @@ class RouteGate(Fixture):
         self.assertEqual(self.launched, [])
         self.assertFalse(self.merged(self.sha))
         self.assertEqual(len(self.comments()), 1)  # о задаче на сдаче; закрытую не будим
+        self.assertIn('conveyor enable', self.bodies[0])
+
+    def test_маршрут_не_прочитан_ждём_молча(self):
+        original = self.api
+
+        def broken(*args, **kwargs):
+            if args[:3] == ('issue', 'conveyor', 'get'):
+                raise RuntimeError('multica issue conveyor get: connection refused')
+            return original(*args, **kwargs)
+
+        c.Multica.return_value = broken
+        with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+            self.tick()
+        self.assertEqual(self.launched, [])
+        self.assertEqual(self.comments(), [])
+        self.assertFalse(self.merged(self.sha))
 
     def test_после_review_и_close_вливается(self):
         with patch.object(c, 'launch_job', side_effect=self.launch_inline):
@@ -320,7 +355,8 @@ class RouteGate(Fixture):
         self.assertEqual(self.comments(), [])
 
     def test_пока_шла_проверка_задачу_вернули_по_маршруту_слияния_нет(self):
-        self.fresh = {'step': 'dev', 'round': '1'}  # список детей ещё старый, перечитанная задача — уже нет
+        # Тик 1 читает маршрут один раз и запускает проверку; тик 2 — второй раз при разметке, третий — перед слиянием.
+        self.later = (3, conveyor(at='dev', status='active'))
         with patch.object(c, 'launch_job', side_effect=self.launch_inline):
             self.tick()
             self.tick()
@@ -328,21 +364,32 @@ class RouteGate(Fixture):
         self.assertFalse(self.merged(self.sha))
         self.assertNotIn(('issue', 'update', 'EP-2', '--status', 'done'), self.writes)
         self.assertEqual(len([e for e in self.events('wait') if 'проверена, но не влита' in e]), 1)
-        self.fresh = {}
+        self.later = None
         with patch.object(c, 'launch_job', side_effect=self.launch_inline):
             self.tick()
         self.assertTrue(self.merged(self.sha))  # маршрут снова на close — вливается без новой проверки
         self.assertEqual(len(self.launched), 1)
 
+    def test_маршрут_принял_другой_коммит_слияния_нет(self):
+        self.conveyors['EP-2'] = conveyor(accepted='f' * 40)
+        with patch.object(c, 'launch_job', side_effect=self.launch_inline):
+            self.tick()
+            self.tick()
+        self.assertEqual(self.launched, [])
+        self.assertFalse(self.merged(self.sha))
+        self.assertEqual(len(self.comments()), 1)
+        self.assertIn('принял коммит ffffffffffff', self.bodies[0])
+
     def test_пока_шла_проверка_сменили_коммит_или_отменили_слияния_нет(self):
+        original = self.api
         for fresh in ({'commit': 'f' * 40}, {'branch': 't-1-other'}):
             with self.subTest(fresh=fresh):
-                self.fresh = fresh
+                c.Multica.return_value = lambda *a, fresh=fresh, **k: (
+                    {**original(*a, **k), 'metadata': {**self.issue['metadata'], **fresh}}
+                    if a[:2] == ('issue', 'get') else original(*a, **k))
                 with patch.object(c, 'launch_job', side_effect=self.launch_inline):
                     self.tick()
                 self.assertFalse(self.merged(self.sha))
-        self.fresh = {}
-        original = self.api
         c.Multica.return_value = lambda *a, **k: ({**original(*a, **k), 'status': 'cancelled'}
                                                   if a[:2] == ('issue', 'get') else original(*a, **k))
         with patch.object(c, 'launch_job', side_effect=self.launch_inline):
@@ -367,7 +414,7 @@ class AcceptJobs(Fixture):
         self.assertEqual(self.job()['status'], 'passed')
         other = self.commit('t-1-y', 'y.ts')
         self.stages = [{'stage': 1, 'issues': [{**copy.deepcopy(self.issue), 'identifier': 'EP-3',
-                                                'metadata': {'branch': 't-1-y', 'commit': other, **PASSED}}, self.issue]}]
+                                                'metadata': {'branch': 't-1-y', 'commit': other}}, self.issue]}]
         with patch.object(c, 'launch_job', side_effect=self.launch_never):
             self.tick()
         self.assertTrue(self.merged(self.sha))

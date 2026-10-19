@@ -63,7 +63,9 @@ TARGET = {'branch': 't-12345-p1', 'sha': 'a' * 40}
 
 class Merge(unittest.TestCase):
     def mark(self, stages, target):
-        c.mark_unmerged([i for st in stages for i in st['issues']], lambda i: target)
+        # Серверный маршрут пройден: review был, маршрут завершён на close.
+        passed = {'status': 'completed', 'step': 'close', 'route': [{'step': 'dev'}, {'step': 'review'}, {'step': 'close'}]}
+        c.mark_unmerged([i for st in stages for i in st['issues']], lambda i: target, lambda i: passed)
 
     def test_невлитая_задача_в_готово_держит_стадию_и_идёт_на_приёмку(self):
         stages = [{'stage': 1, 'issues': [issue('A', 'done', 'sq')]}, {'stage': 2, 'issues': [issue('B')]}]

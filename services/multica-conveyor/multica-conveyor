@@ -12,10 +12,11 @@
    этот коммит, иначе приёмки нет, а причина видна в журнале и на странице. Проверка — отдельная задача atd
    (`--accept-job`), тик её не ждёт: клон этого коммита, поверх — зафиксированный коммит `base`, проверка диффа и
    команды `acceptance`. Одна пара коммитов — одна задача: повтор тика и перезапуск сторожа её не дублируют.
-   Вливается только задача, прошедшая маршрут: в `route` есть шаг `review`, а `step` = `close` (QA, если он в
-   маршруте, идёт до review/close) — решение Евгения 19.10.2026: в `main` вливает сторож, но только после review.
-   Маршрут ещё идёт — задача ждёт молча; дошла до `close` без review или без `route` — один раз лидеру.
-   Перед слиянием задача перечитывается: сменился коммит, маршрут или задачу отменили — не вливается.
+   Вливается только задача, прошедшая серверный маршрут Multica (`multica issue conveyor get`): в маршруте есть
+   шаг `review`, и маршрут завершён на `close` (QA, если он в маршруте, идёт до review/close) — решение Евгения
+   19.10.2026: в `main` вливает сторож, но только после review. Маршрут ведёт Multica, сторож его только читает.
+   Маршрут ещё идёт — задача ждёт молча; завершён без review, выключен или его нет — один раз лидеру.
+   Перед слиянием задача и маршрут перечитываются: сменился коммит, маршрут вернули или задачу отменили — не вливается.
    Зелёно — тот же коммит вливается в `base` (`--no-ff`, хвост сообщения `commit_ref`), задача уходит в «Готово».
    Красно или конфликт — комментарий исполнителю задачи (агенту из assignee; задача на скваде — лидеру) с хвостом
    лога, задача в `in_progress`; та же пара коммитов повторно не гоняется. Код 75 команды — общий ресурс занят:
@@ -42,13 +43,8 @@
 Новую цепочку с экрана ставит, когда у агента ничего не идёт (очередь не мешает). Раны в очереди на прежнем runtime
 multica не выдаст — сторож их снимает и перезапускает задачу на новом.
 
-Маршрут задачи — во всех workspace целей: агент, закончив шаг, пишет в metadata `verdict` (pass | fail | blocked),
-дальше передаёт сторож по `route` (пары «шаг:исполнитель»; `pos` — текущая пара): pass — упоминает следующего,
-последний шаг `close` — статус `in_review` и упоминание его исполнителя (лидера); fail — возврат ближайшему `dev` до
-текущего шага, `round` +1, на третьем круге — лидеру; blocked — лидеру. Выбор задач — фильтр metadata на сервере,
-один запрос на итог; `verdict` снимается только после доставленного упоминания. Ран в задаче с `route` упал
-окончательно, а его никто не подхватит (не лимит и не инфраструктура — их повторяет сторож; не ран, запущенный раном
-агента, — там координатора будит Multica): полоса провайдеров один раз упоминает лидера маршрута.
+Маршрут задачи сторож не ведёт: шаги, возвраты и пробуждение лидера — серверный маршрут Multica
+(`multica issue conveyor`). `metadata.route`/`step` сторож не читает.
 
 Страница статуса — `status_dir`: index.html и status.json каждый тик (эпики, агенты и их провайдеры,
 загрузка подписок, журнал действий). Комментарии в задачи пишет при провале приёмки и блокере её метаданных.
@@ -83,7 +79,7 @@ EVENTS_KEEP = 400
 # Что умеет этот файл: по --capabilities внешний выкатчик решает, какие таймеры включать.
 CAPABILITIES = {'schema': 1, 'lanes': ['epics', 'providers'],
                 'features': ['accept-log', 'acceptance-env', 'accept-kill-group', 'accept-jobs', 'accept-metadata',
-                             'quota-retry-ledger', 'routes', 'route-failures', 'route-gate']}
+                             'quota-retry-ledger', 'server-route-gate']}
 ACCEPT_LOG_KEEP_DAYS = 30
 KILL_GRACE = 5
 # Задача приёмки: queued — отдана atd, running/waiting — идёт (waiting — ждёт общий ресурс), остальное — итог.
@@ -284,38 +280,60 @@ def accept_target(issue, repo):
     return {'branch': branch, 'sha': sha}
 
 
-def route_gate(issue):
+def conveyor_of(m, issue):
+    """Серверный маршрут задачи (`multica issue conveyor get`) или None, если маршрута нет.
+    Другая ошибка CLI поднимается: «не прочитали» — не то же, что «нет маршрута»."""
+    try:
+        return m('issue', 'conveyor', 'get', issue['identifier'])
+    except RuntimeError as e:
+        if re.search(r'no route|not found|404', str(e), re.I):
+            return None
+        raise
+
+
+def route_gate(issue, conveyor):
     """Вливать ли по маршруту: None — можно; иначе причина. Решение Евгения 19.10.2026: сторож вливает в base сам,
-    но только после review (и QA, если он есть в маршруте) — в `route` есть шаг review, и маршрут дошёл до `close`.
-    `step` = `close` ставит только переход после pass последнего шага (или лидер руками)."""
-    meta = issue.get('metadata') or {}
-    route = parse_route(meta.get('route'))
-    if not route:
-        return 'нет `route`: вливание только после review по маршруту'
-    if 'review' not in {step for step, _ in route}:
-        return 'в `route` нет шага review: без review сторож не вливает, добавь `review:Техдиректор` перед `close`'
-    if meta.get('step') != 'close':
-        return f"маршрут не пройден: шаг `{meta.get('step')}`, вливание после `close`"
+    но только после review (и QA, если он есть в маршруте) — в серверном маршруте есть шаг review, и маршрут
+    завершён на `close`. Маршрут ведёт Multica; сторож его только читает."""
+    if not conveyor or conveyor.get('status') == 'disabled':
+        return 'нет маршрута (`multica issue conveyor`): вливание только после review по маршруту'
+    if 'review' not in {n.get('step') for n in conveyor.get('route') or []}:
+        return 'в маршруте нет шага review: без review сторож не вливает, добавь `review:Техдиректор` перед `close`'
+    if conveyor.get('step') != 'close' or conveyor.get('status') != 'completed':
+        return f"маршрут не пройден: шаг `{conveyor.get('step')}` ({conveyor.get('status')}), вливание после `close`"
+    sha = str((issue.get('metadata') or {}).get('commit') or '').strip().lower()
+    accepted = str(conveyor.get('accepted_commit') or '').strip().lower()
+    if accepted and sha and not sha.startswith(accepted):
+        return f'маршрут принял коммит {accepted[:12]}, а в metadata commit {sha[:12]}'
     return None
 
 
-def mark_unmerged(issues, target_of):
+def route_problem(conveyor):
+    """Маршрута не дождаться (его нет, выключен или завершён без review) — нужен лидер; иначе задача ждёт молча."""
+    return not conveyor or conveyor.get('status') in ('disabled', 'completed')
+
+
+def mark_unmerged(issues, target_of, conveyor_of):
     """Пометить задачи на сдаче (`in_review`) и в «Готово», чей коммит из метаданных ещё не в base: `unmerged` —
     его ветка, `accept` — что принимать. У задачи на сдаче, которую принять нельзя, — `accept_problem`.
     Не прошла маршрут (route_gate) — `route_wait`: в приёмку не идёт, но и закрытой не считается. Пока маршрут
-    идёт, это не проблема; дошла до `close` без review или задача без `route` — `accept_problem` лидеру.
-    target_of(issue) -> accept_target."""
+    идёт (или ждёт лидера, или на паузе), это не проблема; маршрут завершён без review, выключен или его нет —
+    `accept_problem` лидеру. target_of(issue) -> accept_target; conveyor_of(issue) -> серверный маршрут или None."""
     for i in issues:
         if not (is_done(i) or status(i) == 'in_review'):
             continue
         target = target_of(i)
         if target and target.get('sha'):
             i['unmerged'], i['accept'] = [target['branch']], target
-            wait = route_gate(i)
+            try:
+                conveyor = conveyor_of(i)
+            except (RuntimeError, subprocess.TimeoutExpired, OSError):
+                i['route_wait'] = 'маршрут не прочитан, повторим в следующем тике'
+                continue
+            wait = route_gate(i, conveyor)
             if wait:
                 i['route_wait'] = wait
-                step = (i.get('metadata') or {}).get('step')
-                if status(i) == 'in_review' and (step == 'close' or not parse_route((i.get('metadata') or {}).get('route'))):
+                if status(i) == 'in_review' and route_problem(conveyor):
                     i['accept_problem'] = wait
         elif target and status(i) == 'in_review':
             i['accept_problem'] = target['problem']
@@ -770,8 +788,9 @@ def report_accept_problem(m, epic, issue, w):
     if issue.get('route_wait'):
         lead = epic.get('lead_id')
         body = (f"{f'[@Тимлид](mention://agent/{lead}), ' if lead else ''}{key} не вливается: {problem}.\n\n"
-                "Сторож вливает в base только задачу, прошедшую review по маршруту (и QA, если он в маршруте). "
-                "Допиши в `route` недостающий шаг и верни задачу на него — после `close` приёмка пойдёт сама.")
+                "Сторож вливает в base только задачу, прошедшую review по серверному маршруту (и QA, если он в "
+                "маршруте). Включи маршрут с шагом review (`multica issue conveyor enable --route …`) или верни "
+                "задачу на review — после `close` приёмка пойдёт сама.")
     else:
         body = None
     body = body or (f"{owner_mention(epic, issue)}приёмка {key} не началась: {problem}.\n\n"
@@ -852,7 +871,7 @@ def accept_issue(m, repo, epic, issue, w, now=None, start=True):
     why = ('задача отменена' if is_cancelled(fresh) else
            'в metadata уже другой branch/commit' if (str(meta.get('branch') or '').strip() != branch or
                                                      str(meta.get('commit') or '').strip().lower() != sha) else
-           route_gate(fresh))
+           route_gate(fresh, conveyor_of(m, fresh)))
     if why:
         problems = w.state.setdefault('_accept_problems', {})
         if problems.get(key) != why:
@@ -867,111 +886,6 @@ def accept_issue(m, repo, epic, issue, w, now=None, start=True):
     issue['unmerged'] = []
     issue['status'] = 'done'
     return True
-
-
-VERDICTS = ('pass', 'fail', 'blocked')
-ROUND_LIMIT = 3  # третий возврат подряд — уже не правка, а вопрос к лидеру и человеку
-
-
-def parse_route(text):
-    return [tuple(x.strip() for x in pair.split(':', 1)) for pair in (text or '').split(',') if ':' in pair]
-
-
-def route_move(meta):
-    """Итог шага → (имя, кого упомянуть; что ему сказать; ключи metadata; новый статус или None)."""
-    route = parse_route(meta.get('route'))
-    lead = route[-1][1] if route and route[-1][0] == 'close' else None
-    # pos различает две пары одного шага (dev:Бэкенд,dev:Фронтенд); `step`, переписанный лидером вручную, главнее.
-    pos = int(meta['pos']) if str(meta.get('pos', '')).isdigit() else None
-    if pos is None or pos >= len(route) or route[pos][0] != meta.get('step'):
-        pos = next((i for i, (step, _) in enumerate(route) if step == meta.get('step')), None)
-    if pos is None:
-        return lead, f"маршрут не разобран (step `{meta.get('step')}`, route `{meta.get('route')}`)", {}, None
-    step, verdict = route[pos][0], meta.get('verdict')
-    if verdict == 'pass':
-        nxt = pos + 1
-        if nxt >= len(route) or route[nxt][0] == 'close':
-            return lead, 'шаг close: маршрут пройден, задача в `in_review`', {'step': 'close', 'pos': min(nxt, len(route) - 1)}, 'in_review'
-        return route[nxt][1], f'шаг {route[nxt][0]}: отчёт предыдущего шага выше', {'step': route[nxt][0], 'pos': nxt}, None
-    if verdict == 'fail':
-        dev = next((i for i in range(pos - 1, -1, -1) if route[i][0] == 'dev'), None)
-        n = int(meta.get('round') or 0) + 1
-        if dev is None:
-            return lead, f'шаг {step} не пройден, а исполнителя `dev` до него в маршруте нет', {}, None
-        if n >= ROUND_LIMIT:
-            return lead, f'круг {n}: шаг {step} не пройден снова — нужен человек', {'round': n}, None
-        return route[dev][1], f'возврат, круг {n}: исправь замечания из отчёта выше и сдай шаг dev', \
-            {'step': 'dev', 'pos': dev, 'round': n}, None
-    return lead, f'шаг {step} остановлен: вопрос или блокер в отчёте выше', {}, None
-
-
-def advance_route(m, w, issue, agents):
-    """Передать задачу по итогу шага. Упоминание — первым: не доставлено — `verdict` остаётся, повторим в тике."""
-    key, meta = issue['identifier'], issue.get('metadata') or {}
-    verdict = meta.get('verdict')
-    if not is_done(issue) and not is_cancelled(issue):
-        who, text, keys, status_to = route_move(meta)
-        mention = f'[@{who}](mention://agent/{agents[who]}) — ' if who in agents else (f'(«{who}» нет среди агентов) ' if who else '')
-        ref = ''.join(f' {k.capitalize()} `{meta[k]}`.' for k in ('branch', 'commit') if meta.get(k))
-        w.permit()
-        add_comment(m, key, f'{mention}{text}.{ref}')
-        if status_to:
-            m('issue', 'update', key, '--status', status_to, write=True)
-        for k, v in keys.items():
-            m('issue', 'metadata', 'set', key, '--key', k, '--value', str(v), write=True)
-        w.log('route', f'{key}: {verdict} → {who or "никто"}: {text}')
-    m('issue', 'metadata', 'delete', key, '--key', 'verdict', write=True)
-
-
-FAILURE_GRACE = dt.timedelta(minutes=5)  # платформа успевает поставить свой повтор
-FAILURES_KEEP = dt.timedelta(days=7)
-
-
-def report_route_failures(m, w, a, entry, runs, now, agent_ids):
-    """Окончательное падение рана в задаче с `route`, которое никто не подхватит, — один раз лидеру маршрута.
-    Лимит и инфраструктуру повторяет сторож; ран, запущенный раном агента, Multica сама возвращает координатору."""
-    seen = entry.setdefault('failures_reported', {})
-    since = ts(entry.setdefault('failures_since', now.isoformat()))  # историю до включения не разбираем
-    for r in runs:
-        done_at = ts(r.get('completed_at'))
-        if (r.get('status') != 'failed' or r['id'] in seen or not r.get('issue_id') or not done_at or done_at < since
-                or now - done_at < FAILURE_GRACE or is_quota_failure(r) or is_infra_failure(r)
-                or (r.get('attribution') or {}).get('delegated_from_task_id')):
-            continue
-        if any(o.get('issue_id') == r['issue_id'] and (o.get('created_at') or '') > r['created_at'] for o in runs):
-            seen[r['id']] = now.isoformat()  # уже повторили
-            continue
-        issue = m('issue', 'get', r['issue_id'])
-        issue = issue.get('issue', issue)
-        meta = issue.get('metadata') or {}
-        route = parse_route(meta.get('route'))
-        lead = route[-1][1] if route and route[-1][0] == 'close' else None
-        ids = agent_ids() if lead else {}
-        if lead not in ids or lead == a['name'] or is_done(issue) or is_cancelled(issue):
-            seen[r['id']] = now.isoformat()
-            continue
-        why = (r.get('error') or r.get('failure_reason') or 'без текста ошибки').strip()[:300]
-        add_comment(m, issue['identifier'], f"[@{lead}](mention://agent/{ids[lead]}) — ран {a['name']} на шаге "
-                    f"`{meta.get('step')}` упал, повтора не будет: {why}. Реши: повторить (`multica issue rerun`), "
-                    "передать другому или позвать человека.")
-        seen[r['id']] = now.isoformat()  # после доставки: ошибка CLI — повтор в следующем проходе
-        w.log('fail', f"{issue['identifier']}: ран {a['name']} упал ({r.get('failure_reason') or 'ошибка'}) — сообщено {lead}")
-    for rid in [k for k, v in seen.items() if now - ts(v) > FAILURES_KEEP]:
-        del seen[rid]
-
-
-def run_routes(w, workspaces):
-    for ws in sorted(workspaces):
-        m = Multica(ws, w.dry, w.permit)
-        found = [i for v in VERDICTS for i in items(m('issue', 'list', '--metadata', f'verdict={v}', '--limit', '100'), 'issues')]
-        if not found:
-            continue
-        agents = {a['name']: a['id'] for a in items(m('agent', 'list'), 'agents') if not a.get('archived_at')}
-        for issue in found:
-            try:
-                advance_route(m, w, issue, agents)
-            except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
-                w.log('error', f"{issue['identifier']}: маршрут не передан, повторим в следующем тике: {str(e)[:200]}")
 
 
 def snap_issue(i, staged=True):
@@ -1046,7 +960,7 @@ def run_epic(epic, w, snapshot, frozen=False):
     if repo:
         # Приёмка не зависит от этапа: любая подзадача на сдаче, в том числе без этапа.
         every = [i for st in stages for i in st['issues']] + unstaged
-        mark_unmerged(every, lambda i: accept_target(i, repo))
+        mark_unmerged(every, lambda i: accept_target(i, repo), lambda i: conveyor_of(m, i))
         for i in every:
             # Причина, по которой задачу на сдаче нельзя принять, — в журнал один раз, пока она не сменится.
             if frozen or w.dry:
@@ -1168,7 +1082,6 @@ def _run_providers(cfg, w, snapshot, settings):
     restore_hours, retry_minutes = pc.get('restore_hours', 5), pc.get('quota_retry_minutes', 20)
     st = w.state.setdefault('_providers', {})
     leaders = {}  # сквад → лидер, на один проход
-    names_by_ws = {}  # workspace → {имя агента: id}, лениво и на один проход
     # Цепочки из конфига и сохранённые на экране агента в Multica.
     for agent_id, a in control.agent_chains(cfg, settings).items():
         chain = a['chain']
@@ -1258,13 +1171,6 @@ def _run_providers(cfg, w, snapshot, settings):
                     entry['exhausted_logged'] = last.get('id')
                     entry['waiting'] = {'since': now.isoformat(), 'wake_at': wake.isoformat(), 'idx': wake_idx}
         record_quota_failures(entry, runs, now)
-        if not w.dry:
-            agent_ids = lambda m=m, ws=ws: names_by_ws.setdefault(ws, {
-                x['name']: x['id'] for x in items(m('agent', 'list'), 'agents') if not x.get('archived_at')})
-            try:
-                report_route_failures(m, w, a, entry, runs, now, agent_ids)
-            except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
-                w.log('error', f"{a['name']}: падение рана не сообщено, повторим в следующем проходе: {str(e)[:200]}")
         rid = actual.get('runtime_id')
         # Повтор — когда профиль агента снова можно брать: после переезда, возврата или будильника, а не в остывающий
         # runtime. Ручной режим и ожидание сброса всей цепочки повторов не делают.
@@ -1695,9 +1601,7 @@ def _run(cfg, dry, providers_only):
               lambda epic=epic, frozen=paused or epic.get('paused', False): run_epic(epic, w, snapshot, frozen=frozen))
              for epic in selected]
     workspaces = {t['key']: t.get('workspace') for t in selected}
-    route_ws = {ws for ws in [*workspaces.values(), cfg.get('providers', {}).get('workspace')] if ws}
     steps += [('провайдеры', None, False, lambda: run_providers(cfg, w, snapshot))] if providers_only else [
-              ('маршруты', None, paused, lambda: run_routes(w, route_ws)),
               ('стенды', None, False, lambda: run_stands(cfg, w, snapshot))]
     for step, target_key, frozen, fn in steps:
         w.target_key = target_key
