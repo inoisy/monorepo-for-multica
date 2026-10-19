@@ -37,6 +37,12 @@
 Новую цепочку с экрана ставит, когда у агента ничего не идёт (очередь не мешает). Раны в очереди на прежнем runtime
 multica не выдаст — сторож их снимает и перезапускает задачу на новом.
 
+Маршрут задачи — во всех workspace целей: агент, закончив шаг, пишет в metadata `verdict` (pass | fail | blocked),
+дальше передаёт сторож по `route` (пары «шаг:исполнитель»; `pos` — текущая пара): pass — упоминает следующего,
+последний шаг `close` — статус `in_review` и упоминание его исполнителя (лидера); fail — возврат ближайшему `dev` до
+текущего шага, `round` +1, на третьем круге — лидеру; blocked — лидеру. Выбор задач — фильтр metadata на сервере,
+один запрос на итог; `verdict` снимается только после доставленного упоминания.
+
 Страница статуса — `status_dir`: index.html и status.json каждый тик (эпики, агенты и их провайдеры,
 загрузка подписок, журнал действий). Комментарии в задачи пишет при провале приёмки и блокере её метаданных.
 `--dry-run` печатает решения, ничего не меняет и страницу не пишет.
@@ -67,7 +73,7 @@ EVENTS_KEEP = 400
 # Что умеет этот файл: по --capabilities внешний выкатчик решает, какие таймеры включать.
 CAPABILITIES = {'schema': 1, 'lanes': ['epics', 'providers'],
                 'features': ['accept-log', 'acceptance-env', 'accept-kill-group', 'accept-jobs', 'accept-metadata',
-                             'quota-retry-ledger']}
+                             'quota-retry-ledger', 'routes']}
 ACCEPT_LOG_KEEP_DAYS = 30
 KILL_GRACE = 5
 # Задача приёмки: queued — отдана atd, running/waiting — идёт (waiting — ждёт общий ресурс), остальное — итог.
@@ -693,6 +699,15 @@ def owner_mention(epic, issue):
     return f"[@Тимлид](mention://agent/{lead}), " if lead else ''
 
 
+def add_comment(m, key, body):
+    """Комментарий через файл: тело может быть длинным и содержать markdown."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', encoding='utf-8') as content:
+        content.write(body)
+        content.flush()
+        os.chmod(content.name, 0o644)
+        m('issue', 'comment', 'add', key, '--content-file', content.name, '--allow-external-file', write=True)
+
+
 def report_failure(m, epic, repo, issue, branch, why, tail):
     key = issue['identifier']
     cmds = ', '.join(f'`{c}`' for c in epic.get('acceptance', []))
@@ -700,14 +715,7 @@ def report_failure(m, epic, repo, issue, branch, why, tail):
             f"клон ветки поверх свежего `{repo.base}`, проверка диффа, затем {cmds}. Почини в той же ветке, запиши "
             f"новый полный SHA в metadata `commit` и верни задачу в `in_review` — конвейер примет и вольёт сам."
             f"\n\n```\n{tail.strip()[-2500:]}\n```")
-    fd, path = tempfile.mkstemp(suffix='.md')
-    os.write(fd, body.encode())
-    os.close(fd)
-    os.chmod(path, 0o644)
-    try:
-        m('issue', 'comment', 'add', key, '--content-file', path, '--allow-external-file', write=True)
-    finally:
-        os.unlink(path)
+    add_comment(m, key, body)
     m('issue', 'update', key, '--status', 'in_progress', write=True)
 
 
@@ -728,15 +736,12 @@ def report_accept_problem(m, epic, issue, w):
             "Сторож не угадывает ветку по комментариям и не меняет статус из-за неполных метаданных. "
             "После исправления приёмка продолжится в следующем тике.")
     w.permit()
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', encoding='utf-8') as content:
-        content.write(body)
-        content.flush()
-        try:
-            m('issue', 'comment', 'add', key, '--content-file', content.name, '--allow-external-file', write=True)
-        except (RuntimeError, subprocess.TimeoutExpired, OSError):
-            # Не логировать сырой ответ CLI: он может содержать credentials.
-            w.log('wait', f"{epic['key']}: {key} — уведомление о блокере приёмки не доставлено, повторим в следующем тике")
-            return
+    try:
+        add_comment(m, key, body)
+    except (RuntimeError, subprocess.TimeoutExpired, OSError):
+        # Не логировать сырой ответ CLI: он может содержать credentials.
+        w.log('wait', f"{epic['key']}: {key} — уведомление о блокере приёмки не доставлено, повторим в следующем тике")
+        return
     notified[key] = problem
     w.save()  # Следующая задача/тик не должны повторять уже доставленный комментарий.
 
@@ -800,6 +805,74 @@ def accept_issue(m, repo, epic, issue, w, now=None):
     issue['unmerged'] = []
     issue['status'] = 'done'
     return True
+
+
+VERDICTS = ('pass', 'fail', 'blocked')
+ROUND_LIMIT = 3  # третий возврат подряд — уже не правка, а вопрос к лидеру и человеку
+
+
+def parse_route(text):
+    return [tuple(x.strip() for x in pair.split(':', 1)) for pair in (text or '').split(',') if ':' in pair]
+
+
+def route_move(meta):
+    """Итог шага → (имя, кого упомянуть; что ему сказать; ключи metadata; новый статус или None)."""
+    route = parse_route(meta.get('route'))
+    lead = route[-1][1] if route and route[-1][0] == 'close' else None
+    # pos различает две пары одного шага (dev:Бэкенд,dev:Фронтенд); `step`, переписанный лидером вручную, главнее.
+    pos = int(meta['pos']) if str(meta.get('pos', '')).isdigit() else None
+    if pos is None or pos >= len(route) or route[pos][0] != meta.get('step'):
+        pos = next((i for i, (step, _) in enumerate(route) if step == meta.get('step')), None)
+    if pos is None:
+        return lead, f"маршрут не разобран (step `{meta.get('step')}`, route `{meta.get('route')}`)", {}, None
+    step, verdict = route[pos][0], meta.get('verdict')
+    if verdict == 'pass':
+        nxt = pos + 1
+        if nxt >= len(route) or route[nxt][0] == 'close':
+            return lead, 'шаг close: маршрут пройден, задача в `in_review`', {'step': 'close', 'pos': min(nxt, len(route) - 1)}, 'in_review'
+        return route[nxt][1], f'шаг {route[nxt][0]}: отчёт предыдущего шага выше', {'step': route[nxt][0], 'pos': nxt}, None
+    if verdict == 'fail':
+        dev = next((i for i in range(pos - 1, -1, -1) if route[i][0] == 'dev'), None)
+        n = int(meta.get('round') or 0) + 1
+        if dev is None:
+            return lead, f'шаг {step} не пройден, а исполнителя `dev` до него в маршруте нет', {}, None
+        if n >= ROUND_LIMIT:
+            return lead, f'круг {n}: шаг {step} не пройден снова — нужен человек', {'round': n}, None
+        return route[dev][1], f'возврат, круг {n}: исправь замечания из отчёта выше и сдай шаг dev', \
+            {'step': 'dev', 'pos': dev, 'round': n}, None
+    return lead, f'шаг {step} остановлен: вопрос или блокер в отчёте выше', {}, None
+
+
+def advance_route(m, w, issue, agents):
+    """Передать задачу по итогу шага. Упоминание — первым: не доставлено — `verdict` остаётся, повторим в тике."""
+    key, meta = issue['identifier'], issue.get('metadata') or {}
+    verdict = meta.get('verdict')
+    if not is_done(issue) and not is_cancelled(issue):
+        who, text, keys, status_to = route_move(meta)
+        mention = f'[@{who}](mention://agent/{agents[who]}) — ' if who in agents else (f'(«{who}» нет среди агентов) ' if who else '')
+        ref = ''.join(f' {k.capitalize()} `{meta[k]}`.' for k in ('branch', 'commit') if meta.get(k))
+        w.permit()
+        add_comment(m, key, f'{mention}{text}.{ref}')
+        if status_to:
+            m('issue', 'update', key, '--status', status_to, write=True)
+        for k, v in keys.items():
+            m('issue', 'metadata', 'set', key, '--key', k, '--value', str(v), write=True)
+        w.log('route', f'{key}: {verdict} → {who or "никто"}: {text}')
+    m('issue', 'metadata', 'delete', key, '--key', 'verdict', write=True)
+
+
+def run_routes(w, workspaces):
+    for ws in sorted(workspaces):
+        m = Multica(ws, w.dry, w.permit)
+        found = [i for v in VERDICTS for i in items(m('issue', 'list', '--metadata', f'verdict={v}', '--limit', '100'), 'issues')]
+        if not found:
+            continue
+        agents = {a['name']: a['id'] for a in items(m('agent', 'list'), 'agents') if not a.get('archived_at')}
+        for issue in found:
+            try:
+                advance_route(m, w, issue, agents)
+            except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+                w.log('error', f"{issue['identifier']}: маршрут не передан, повторим в следующем тике: {str(e)[:200]}")
 
 
 def snap_issue(i, staged=True):
@@ -1234,7 +1307,8 @@ def quotas(cfg):
 STATUS_RU = {'backlog': 'ждёт этапа', 'todo': 'к выполнению', 'in_progress': 'в работе', 'in_review': 'сдана',
              'done': 'готово', 'blocked': 'стоит', 'cancelled': 'отменена'}
 KIND_RU = {'merge': 'слияние', 'fail': 'провал', 'assign': 'запуск', 'retry': 'повтор', 'provider': 'провайдер',
-           'level': 'уровень', 'error': 'ошибка', 'stand': 'стенд', 'accept': 'приёмка', 'wait': 'ожидание'}
+           'level': 'уровень', 'error': 'ошибка', 'stand': 'стенд', 'accept': 'приёмка', 'wait': 'ожидание',
+           'route': 'маршрут'}
 
 
 ICON = {  # статус пайплайна GitLab: цвет и символ в кружке
@@ -1467,9 +1541,11 @@ def _run(cfg, dry, providers_only):
     steps = [] if providers_only else [(epic['key'], epic['key'], paused or epic.get('paused', False),
               lambda epic=epic, frozen=paused or epic.get('paused', False): run_epic(epic, w, snapshot, frozen=frozen))
              for epic in selected]
-    steps += [('провайдеры', None, False, lambda: run_providers(cfg, w, snapshot))] if providers_only else [
-              ('стенды', None, False, lambda: run_stands(cfg, w, snapshot))]
     workspaces = {t['key']: t.get('workspace') for t in selected}
+    route_ws = {ws for ws in [*workspaces.values(), cfg.get('providers', {}).get('workspace')] if ws}
+    steps += [('провайдеры', None, False, lambda: run_providers(cfg, w, snapshot))] if providers_only else [
+              ('маршруты', None, paused, lambda: run_routes(w, route_ws)),
+              ('стенды', None, False, lambda: run_stands(cfg, w, snapshot))]
     for step, target_key, frozen, fn in steps:
         w.target_key = target_key
         w.ws = workspaces.get(target_key)
