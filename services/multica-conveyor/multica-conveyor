@@ -25,7 +25,8 @@
    провалена. Полный лог без токенов — accept/<задача>-<sha>.log рядом с state.json; по таймауту убивается вся группа
    процессов.
 2. Стадия закрыта, когда все её задачи в «Готово» и влиты (или отменены).
-3. Задачи первой незакрытой стадии без исполнителя назначаются скваду (назначение стартует ран). Задача с
+3. Задачи первой незакрытой стадии без исполнителя назначаются скваду (назначение стартует ран). Если стадии
+   эпика назначает сервер multica (`multica issue stages <эпик> --squad …`), сторож не назначает. Задача с
    «**Ждёт:**» в описании ждёт ответа заказчика: конвейер её пропускает; стадия, где открыты только такие задачи,
    следующие не держит.
 4. Инфраструктурный автоповтор задач активной стадии (см. README). Повтор после лимита провайдера здесь не делается:
@@ -80,7 +81,7 @@ EVENTS_KEEP = 400
 # Что умеет этот файл: по --capabilities внешний выкатчик решает, какие таймеры включать.
 CAPABILITIES = {'schema': 1, 'lanes': ['epics', 'providers'],
                 'features': ['accept-log', 'acceptance-env', 'accept-kill-group', 'accept-jobs', 'accept-metadata',
-                             'quota-retry-ledger', 'server-route-gate', 'route-accept-step']}
+                             'quota-retry-ledger', 'server-route-gate', 'route-accept-step', 'server-stage-dispatch']}
 ACCEPT_LOG_KEEP_DAYS = 30
 KILL_GRACE = 5
 # Задача приёмки: queued — отдана atd, running/waiting — идёт (waiting — ждёт общий ресурс), остальное — итог.
@@ -1055,8 +1056,21 @@ def run_epic(epic, w, snapshot, frozen=False):
         for i in [i for st in stages for i in st['issues']] + unstaged:
             if i['identifier'] in journal and (i.get('assignee_id') or closed(i)):
                 del journal[i['identifier']]
+    if to_assign and not frozen and server_dispatches(m, epic):
+        # Стадии этого эпика назначает сервер multica (`multica issue stages`): сторож не назначает вторым.
+        to_assign = []
     for issue in [] if frozen else to_assign:
         dispatch_issue(m, epic, stage, issue, w, now)
+
+
+def server_dispatches(m, epic):
+    """Назначает ли стадии эпика сам сервер multica. Старый multica без `issue stages` — нет."""
+    if epic.get('kind') == 'issue':
+        return False
+    try:
+        return bool(m('issue', 'stages', epic['key']).get('squad_id'))
+    except (RuntimeError, subprocess.TimeoutExpired, OSError):
+        return False
 
 
 def apply_profile(m, agent_id, p):

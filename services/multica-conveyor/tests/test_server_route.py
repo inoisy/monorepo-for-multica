@@ -27,6 +27,7 @@ class NoRouteMachinery(unittest.TestCase):
         features = c.CAPABILITIES['features']
         self.assertIn('server-route-gate', features)
         self.assertIn('route-accept-step', features)
+        self.assertIn('server-stage-dispatch', features)
         for gone in ('routes', 'route-failures', 'route-gate'):
             self.assertNotIn(gone, features)
 
