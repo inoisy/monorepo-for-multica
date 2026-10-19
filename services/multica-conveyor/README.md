@@ -88,8 +88,8 @@ claude/codex-reserve), поэтому на сервере три копии од
 Шаги, возвраты, пробуждение лидера и сообщения о падениях ранов в маршруте сторож не делает — это серверный
 маршрут. Открытые задачи с `metadata.route` переводятся на серверный маршрут после выкатки этой версии сторожа:
 `MULTICA_WORKSPACE_ID=<ws> services/multica-conveyor/migrate-routes STT-239` — сухой прогон, `--apply` — включить
-(`issue conveyor enable --route <route> --from-step <step>`) и удалить из metadata `route`/`step`/`pos`/`round`/
-`verdict`. Задачи со сданным, но не переданным шагом (`verdict`) и пройденные до `close` скрипт не включает, а
+(`issue conveyor enable --route <route> --from-step <step>`) и удалить из metadata `route`/`pos`/`round`/`verdict`
+(`step` дальше пишет сервер). Задачи со сданным, но не переданным шагом (`verdict`) и пройденные до `close` скрипт не включает, а
 печатает в отчёт — шаг решает лидер. Откат — прежний `multica-conveyor` и `multica issue conveyor disable <задача>`.
 
 При переходе на этот контракт уже сданным задачам нужно заполнить `branch`/`commit`: человек или агент сверяет

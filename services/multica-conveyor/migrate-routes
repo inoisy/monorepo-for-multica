@@ -13,12 +13,13 @@
   --route … --from-step <шаг>`; для пройденной без серверного маршрута — `--from-step review`);
 - маршрут уже включён на сервере — только чистка metadata;
 - включение отклонено (идёт ран, агент без runtime, нет прав) — в отчёт, metadata не трогается.
-После включения из metadata удаляются `route`, `step`, `pos`, `round`, `verdict`. `branch` и `commit` остаются — по ним
-сторож принимает задачу. Код выхода 1 — в отчёте есть задачи, которые не переведены.
+После включения из metadata удаляются `route`, `pos`, `round`, `verdict`. `step` с этого момента пишет сервер, `branch`
+и `commit` остаются — по ним сторож принимает задачу. Код выхода 1 — в отчёте есть задачи, которые не переведены.
 """
 import json, os, re, subprocess, sys
 
-ROUTE_KEYS = ('route', 'step', 'pos', 'round', 'verdict')
+# `step` остаётся: серверный маршрут сам пишет его на каждом шаге.
+ROUTE_KEYS = ('route', 'pos', 'round', 'verdict')
 CLOSED = {'done', 'cancelled', 'canceled'}
 
 

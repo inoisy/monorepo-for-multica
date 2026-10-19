@@ -64,14 +64,15 @@ class Migrate(unittest.TestCase):
         m, report = self.run_it(True, conveyors={'STT-244'}, refuse={'STT-245'})
         w = m.writes()
         self.assertIn(('issue', 'conveyor', 'enable', 'STT-240', '--route', ROUTE, '--from-step', 'qa'), w)
-        self.assertEqual([a[5] for a in w if a[:4] == ('issue', 'metadata', 'delete', 'STT-240')], ['route', 'step', 'pos', 'round'])
+        self.assertEqual([a[5] for a in w if a[:4] == ('issue', 'metadata', 'delete', 'STT-240')], ['route', 'pos', 'round'])
         # branch и commit остаются — по ним сторож принимает задачу
         self.assertFalse(any(a[5] in ('branch', 'commit') for a in w if a[:3] == ('issue', 'metadata', 'delete')))
         # закрытая — только чистка; уже включённая на сервере — без повторного enable
         self.assertNotIn('STT-243', [a[3] for a in w if a[2] == 'enable'])
         self.assertIn(('issue', 'metadata', 'delete', 'STT-243', '--key', 'route'), w)
         self.assertNotIn('STT-244', [a[3] for a in w if a[2] == 'enable'])
-        self.assertIn(('issue', 'metadata', 'delete', 'STT-244', '--key', 'step'), w)
+        self.assertIn(('issue', 'metadata', 'delete', 'STT-244', '--key', 'route'), w)
+        self.assertFalse([a for a in w if a[:3] == ('issue', 'metadata', 'delete') and a[5] == 'step'])
         # пройденная, сданная без передачи и отклонённая сервером — в отчёт, metadata не трогается
         self.assertEqual(sorted(k for k, _ in report), ['STT-241', 'STT-242', 'STT-245'])
         for key in ('STT-241', 'STT-242', 'STT-245'):
