@@ -98,5 +98,72 @@ class Advance(unittest.TestCase):
         self.assertIn('mention://agent/l', self.bodies[0])
 
 
+class RouteFailures(unittest.TestCase):
+    """Окончательное падение рана в задаче с `route` — лидеру, если его не подхватят сторож и Multica."""
+
+    def setUp(self):
+        self.now = c.now_utc().replace(microsecond=0)
+        self.entry = {'failures_since': self.at(-60)}
+        self.writes, self.bodies, self.fail_comment = [], [], False
+        self.issue = {'identifier': 'EP-2', 'status': 'dev', 'metadata': {'route': ROUTE, 'step': 'dev'}}
+
+    def at(self, minutes):
+        return (self.now + c.dt.timedelta(minutes=minutes)).isoformat()
+
+    def run_(self, rid='r1', minutes=-10, **extra):
+        return {'id': rid, 'issue_id': 'i', 'status': 'failed', 'error': 'Tool crashed', 'failure_reason': 'agent_error.unknown',
+                'created_at': self.at(minutes - 30), 'completed_at': self.at(minutes), **extra}
+
+    def m(self, *args, write=False):
+        if args[:2] == ('issue', 'get'):
+            return self.issue
+        if args[:3] == ('issue', 'comment', 'add'):
+            if self.fail_comment:
+                raise RuntimeError('CLI недоступен')
+            self.bodies.append(open(args[args.index('--content-file') + 1]).read())
+        self.writes.append(args)
+        return {}
+
+    def report(self, runs, name='Фронтенд'):
+        w = FakeWatch()
+        c.report_route_failures(self.m, w, {'name': name}, self.entry, runs, self.now, lambda: AGENTS)
+        return w
+
+    def test_падение_сообщается_лидеру_один_раз(self):
+        self.report([self.run_()])
+        self.report([self.run_()])
+        self.assertEqual(len(self.bodies), 1)
+        self.assertIn('mention://agent/l', self.bodies[0])
+        self.assertIn('Tool crashed', self.bodies[0])
+
+    def test_не_сообщается_то_что_подхватят_другие(self):
+        self.report([self.run_('quota', error='You’ve hit your session limit'),
+                     self.run_('infra', failure_reason='runtime_recovery', error=''),
+                     self.run_('delegated', attribution={'delegated_from_task_id': 'src'}),
+                     self.run_('fresh', minutes=-1),
+                     self.run_('old', minutes=-90)])
+        self.assertEqual(self.bodies, [])
+
+    def test_повторённый_закрытый_и_без_маршрута_не_сообщаются(self):
+        self.report([self.run_('r1'), {'id': 'r2', 'issue_id': 'i', 'status': 'running', 'created_at': self.at(-5)}])
+        self.issue['status'] = 'done'
+        self.report([self.run_('r3')])
+        self.issue.update(status='dev', metadata={})
+        self.report([self.run_('r4')])
+        self.assertEqual(self.bodies, [])
+
+    def test_ран_самого_лидера_не_сообщается(self):
+        self.report([self.run_()], name='Тимлид')
+        self.assertEqual(self.bodies, [])
+
+    def test_недоставленное_сообщение_повторяется(self):
+        self.fail_comment = True
+        with self.assertRaises(RuntimeError):
+            self.report([self.run_()])
+        self.fail_comment = False
+        self.report([self.run_()])
+        self.assertEqual(len(self.bodies), 1)
+
+
 if __name__ == '__main__':
     unittest.main()
