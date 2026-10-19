@@ -584,11 +584,15 @@ def worker_alive(path):
 
 def launch_job(path):
     """Отдать проверку atd. Юнит сторожа — oneshot: при выходе systemd убивает всех его потомков, а задача atd живёт
-    вне юнита, поэтому тик её не ждёт, а выкладка и перезапуск сторожа её не прерывают. Возвращает номер задачи at."""
+    вне юнита, поэтому тик её не ждёт, а выкладка и перезапуск сторожа её не прерывают. Возвращает номер задачи at.
+    atd сохраняет окружение и каталог постановщика: без TMPDIR/TMP/TEMP и из каталога задач, иначе тик вручную
+    из рана агента отдаёт проверке его /tmp/multica-task-…, который демон удаляет по концу рана."""
     out = path.with_suffix('.out')
     cmd = (f'exec {shlex.quote(sys.executable)} -I {shlex.quote(str(Path(__file__).resolve()))} --accept-job '
            f'{shlex.quote(str(path))} >>{shlex.quote(str(out))} 2>&1\n')
-    r = subprocess.run(['at', 'now'], input=cmd, capture_output=True, text=True, timeout=60)
+    env = {k: v for k, v in os.environ.items() if k not in ('TMPDIR', 'TMP', 'TEMP')}
+    r = subprocess.run(['at', 'now'], input=cmd, capture_output=True, text=True, timeout=60, env=env,
+                       cwd=str(path.parent))
     if r.returncode:
         raise RuntimeError(f'at now: {r.stderr.strip()[:300]}')
     m = re.search(r'\bjob (\d+)', r.stderr)
