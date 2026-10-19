@@ -21,9 +21,7 @@ ETC=/etc/harness-control
 STATE=/var/lib/harness-control
 SYSTEMD=/etc/systemd/system
 SUDOERS=/etc/sudoers.d/harness-control
-UNITS_SRC=$PKG/units
-[[ -d $UNITS_SRC ]] || UNITS_SRC=$(dirname -- "$PKG")/multica-conveyor/systemd
-COMPONENTS=(harness-canary multica-conveyor)
+COMPONENTS=(harness-canary control-state)
 
 run() {
   local shown="$*"
@@ -36,12 +34,8 @@ package_files() {
   (cd "$PKG" && find harness_control bin checks policy.d canary bootstrap VERSION -type f \
       ! -path '*/__pycache__/*' ! -name '*.pyc' ! -path 'canary/tests/*' | LC_ALL=C sort)
 }
-unit_files() { printf '%s\n' multica-provider.service multica-provider.timer; }
 package_sha() {
-  {
-    (cd "$PKG" && package_files_sha)
-    for u in $(unit_files); do printf '%s  units/%s\n' "$(sha256sum "$UNITS_SRC/$u" | cut -d' ' -f1)" "$u"; done
-  } | LC_ALL=C sort -k2 | sha256sum | cut -d' ' -f1
+  (cd "$PKG" && package_files_sha) | LC_ALL=C sort -k2 | sha256sum | cut -d' ' -f1
 }
 package_files_sha() { package_files | while read -r f; do printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"; done; }
 
@@ -68,11 +62,6 @@ if [[ $MODE != check ]]; then
   if systemctl list-units --no-legend --state=active 'harness-op-*' 2>/dev/null | grep -q .; then
     echo 'идёт операция harness-control; дождитесь завершения и повторите' >&2; exit 1
   fi
-  for u in $(unit_files); do
-    if [[ -e $SYSTEMD/$u ]] && ! cmp -s "$UNITS_SRC/$u" "$SYSTEMD/$u"; then
-      echo "$SYSTEMD/$u отличается от пакета; проверьте вручную" >&2; exit 1
-    fi
-  done
 fi
 
 # --- каталоги -----------------------------------------------------------------------------
@@ -101,13 +90,15 @@ fi
 while read -r f; do
   case $f in policy.d/*) run install -o root -g root -m 0644 "$PKG/$f" "$ETC/$f" ;; esac
 done < <(package_files)
+# Компоненты, которых больше нет в пакете: сторож конвейера снят (маршрут, приёмка и стадии теперь в multica),
+# его политика не должна оставаться в силе после обновления.
+for stale in multica-conveyor; do
+  if [[ -e $ETC/policy.d/$stale.json ]]; then run rm -f "$ETC/policy.d/$stale.json"; fi
+done
 
 # --- юниты ------------------------------------------------------------------------------------
 for u in harness-control-recover.service harness-canary.service harness-canary.timer; do
   run install -o root -g root -m 0644 "$HERE/$u" "$SYSTEMD/$u"
-done
-for u in $(unit_files); do
-  [[ -e $SYSTEMD/$u ]] || run install -o root -g root -m 0644 "$UNITS_SRC/$u" "$SYSTEMD/$u"
 done
 if [[ ! -e /usr/local/lib/harness-canary/canary.py ]]; then
   run install -d -o root -g root -m 0755 /usr/local/lib/harness-canary
@@ -117,7 +108,6 @@ fi
 run systemctl daemon-reload
 run systemctl enable harness-control-recover.service
 run systemctl enable --now harness-canary.timer
-echo '  (multica-provider.timer ставится выключенным: его включает harness-control по --capabilities артефакта)'
 
 # --- baseline: текущие установленные файлы, чтобы откат был с первого дня ---------------------
 for c in "${COMPONENTS[@]}"; do

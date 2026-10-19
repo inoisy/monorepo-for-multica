@@ -1,0 +1,146 @@
+#!/usr/bin/python3 -I
+"""Перенос целей сторожа конвейера в multica: стадии эпиков назначает сервер, ждущие задачи — статусом, приёмка —
+шагом `accept` маршрута. Одноразово, перед снятием сторожа (`retire-host`).
+
+    epics-to-stages [--config /etc/multica-conveyor.json] [--controls <controls.json>] [--out <каталог>] [--apply]
+
+Без `--apply` — сухой прогон: печатает, что сделал бы. С `--apply`, по каждой включённой цели-эпику:
+- `multica issue stages <эпик> --squad <squad_id>` в её workspace (цель на паузе пульта — не включается, только отчёт);
+- открытые подзадачи с «**Ждёт:**» в описании — статус `waiting` («Ждёт заказчика»);
+- в `--out/<репозиторий>.acceptance.json` — черновик `.multica/acceptance.json` из настроек приёмки цели: его кладут в
+  репозиторий отдельным коммитом и ревью. Значения `acceptance_env` в черновик не попадают (там бывают секреты) — только
+  имена: их задают в окружении демонов, исполняющих `accept`.
+Стенды из `stands` конфига — в `--out/stand-seed.json`, черновик `/etc/stand/seed.json` для `stand-seed`.
+Цели вида `issue` (одна задача без стадий) и `overrides` (уровни на задачу) не переносятся — в отчёт.
+Код выхода 1 — в отчёте есть то, что не перенесено.
+"""
+import argparse, json, os, re, subprocess, sys
+from pathlib import Path
+
+HOLD = '**Ждёт:**'
+CLOSED = {'done', 'cancelled', 'canceled'}
+
+
+def parse_json(out):
+    out = out.strip()
+    if not out.startswith(('{', '[')):
+        return {}
+    return json.JSONDecoder().raw_decode(out)[0]
+
+
+def multica_for(ws):
+    def call(*a):
+        r = subprocess.run(['multica', *a, '--output', 'json'], capture_output=True, text=True, timeout=120,
+                           env={**os.environ, 'MULTICA_WORKSPACE_ID': ws})
+        if r.returncode:
+            raise RuntimeError(f'multica {" ".join(a[:3])}: {r.stderr.strip()[:300]}')
+        return parse_json(r.stdout)
+    return call
+
+
+def load_targets(config, controls):
+    """Цели сторожа так же, как их видел он сам: конфиг плюс включение и пауза пульта."""
+    cfg = json.loads(Path(config).read_text())
+    settings = json.loads(Path(controls).read_text()) if controls and Path(controls).exists() else {}
+    saved = settings.get('targets', {})
+    out, configured = [], set()
+    for epic in cfg.get('epics', []):
+        configured.add(epic['key'])
+        mine = saved.get(epic['key'], {})
+        if mine.get('removed'):
+            continue
+        out.append({**mine, **epic, 'kind': epic.get('kind', 'epic'),
+                    'enabled': mine.get('enabled', True), 'paused': mine.get('paused', False)})
+    for key, target in saved.items():
+        if key not in configured and not target.get('removed'):
+            out.append({'paused': False, **target, 'key': key})
+    return out
+
+
+def acceptance_draft(target):
+    """Черновик .multica/acceptance.json из настроек приёмки цели сторожа; None — приёмки у цели нет."""
+    if not target.get('acceptance'):
+        return None
+    draft = {'base': target.get('base', 'main'), 'commands': list(target['acceptance']),
+             'timeout_seconds': int(target.get('acceptance_timeout', 1500)),
+             'busy_exit_codes': list(target.get('acceptance_busy_codes', [75])),
+             'wait_poll_seconds': int(target.get('acceptance_wait_poll', 60)),
+             'wait_max_seconds': int(target.get('acceptance_wait_max', 7200)),
+             'env': {'E2E_LOCK_WAIT': '0'}}
+    return draft
+
+
+def repo_name(repo):
+    return re.sub(r'[^A-Za-z0-9._-]+', '-', Path(str(repo).rstrip('/')).name.removesuffix('.git')) or 'repo'
+
+
+def migrate(targets, multica_for, apply=False, out_dir=None, say=print):
+    report = []
+    for t in targets:
+        key = t['key']
+        if not t.get('enabled', True):
+            say(f'{key}: цель выключена в пульте — пропуск')
+            continue
+        if t.get('kind') == 'issue':
+            report.append((key, 'цель-задача без стадий: переносить нечего, маршрут — шаблоном сквада'))
+            continue
+        if t.get('overrides'):
+            report.append((key, 'overrides (уровни на задачу) не переносятся: задать профиль модели на задачах'))
+        draft = acceptance_draft(t)
+        if draft and out_dir:
+            path = Path(out_dir) / f"{repo_name(t.get('repo', key))}.acceptance.json"
+            say(f"{key}: черновик приёмки → {path}")
+            if apply:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(draft, ensure_ascii=False, indent=2) + '\n')
+        if draft and t.get('acceptance_env'):
+            report.append((key, 'acceptance_env задать в окружении демонов с runtime accept: '
+                                + ', '.join(sorted(t['acceptance_env']))))
+        if not t.get('workspace') or not t.get('squad_id'):
+            report.append((key, 'нет workspace или squad_id у цели'))
+            continue
+        m = multica_for(t['workspace'])
+        try:
+            if t.get('paused'):
+                report.append((key, 'цель на паузе в пульте: серверное назначение не включено, включить вручную'))
+            else:
+                say(f"{key}: issue stages --squad {t['squad_id']}")
+                if apply:
+                    m('issue', 'stages', key, '--squad', t['squad_id'])
+            children = m('issue', 'children', key)
+            for issue in [i for st in children.get('stages', []) for i in st['issues']] + children.get('unstaged', []):
+                status = issue.get('status') or issue.get('status_category')
+                if HOLD in (issue.get('description') or '') and status not in CLOSED and status != 'waiting':
+                    say(f"{issue['identifier']}: «Ждёт:» в описании → статус waiting")
+                    if apply:
+                        m('issue', 'update', issue['identifier'], '--status', 'waiting')
+        except RuntimeError as e:
+            report.append((key, str(e)[:300]))
+    return report
+
+
+def main(argv):
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument('--config', default='/etc/multica-conveyor.json')
+    p.add_argument('--controls', default=str(Path.home() / '.local/state/multica-control/controls.json'))
+    p.add_argument('--out', default='acceptance-drafts')
+    p.add_argument('--apply', action='store_true')
+    a = p.parse_args(argv)
+    if not a.apply:
+        print('Сухой прогон: ничего не меняется. С --apply — включить стадии, проставить waiting, записать черновики.')
+    report = migrate(load_targets(a.config, a.controls), multica_for, a.apply, a.out)
+    stands = json.loads(Path(a.config).read_text()).get('stands', [])
+    if stands:
+        print(f"стенды ({', '.join(s['name'] for s in stands)}) → {a.out}/stand-seed.json для /etc/stand/seed.json")
+        if a.apply:
+            Path(a.out).mkdir(parents=True, exist_ok=True)
+            (Path(a.out) / 'stand-seed.json').write_text(json.dumps({'stands': stands}, ensure_ascii=False, indent=2) + '\n')
+    if report:
+        print('\nНе перенесено или требует действия:')
+        for key, why in report:
+            print(f'  {key}: {why}')
+    return 1 if report else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

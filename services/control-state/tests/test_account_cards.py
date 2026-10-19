@@ -1,7 +1,11 @@
 import copy
 import unittest
 
-from test_conveyor import c
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import control_state as control  # noqa: E402
 
 
 class AccountCards(unittest.TestCase):
@@ -17,13 +21,13 @@ class AccountCards(unittest.TestCase):
         ]
 
     def test_groups_shared_keys_by_provider_and_row_in_table_order(self):
-        groups = c.control.accounts(self.subs)
+        groups = control.accounts(self.subs)
         self.assertEqual([[s['id'] for s in group] for group in groups],
                          [['main', 'max'], ['other'], ['standalone']])
 
     def test_card_combines_windows_and_preserves_per_key_subscription_data(self):
         before = copy.deepcopy(self.subs)
-        card = c.control.account_card(self.subs[:2])
+        card = control.account_card(self.subs[:2])
         self.assertEqual(card['id'], 'main')
         self.assertEqual(card['keys'], ['main', 'max'])
         self.assertEqual(card['windows'], ['5h', 'week'])
@@ -33,7 +37,7 @@ class AccountCards(unittest.TestCase):
         self.assertEqual(self.subs, before)
 
     def test_single_account_retains_its_subscription(self):
-        card = c.control.account_card([self.subs[-1]])
+        card = control.account_card([self.subs[-1]])
         self.assertEqual(card, {**self.subs[-1], 'keys': ['standalone'], 'effective': {}})
 
 
