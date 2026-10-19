@@ -1,0 +1,43 @@
+{
+  "component": "control-state",
+  "description": "Общий модуль подписок control_state.py: его импортирует subs-pick при старте каждого рана claude/codex-reserve и пульт",
+  "source": {
+    "repo": "https://github.com/inoisy/monorepo-for-multica.git",
+    "path": "services/control-state",
+    "require_ref": "origin/main"
+  },
+  "targets": [
+    {"src": "control_state.py", "dst": "/usr/local/bin/control_state.py", "mode": "0644"},
+    {"src": "control_state.py", "dst": "/opt/multica-control/control_state.py", "mode": "0644"}
+  ],
+  "restart_units": [
+    {"unit": "multica-control.service", "when_changed": ["/opt/multica-control/control_state.py"]}
+  ],
+  "baseline_capabilities": {"lanes": []},
+  "validate": {
+    "checks": [
+      {"name": "state-compat", "argv": ["/usr/bin/python3", "-I", "{checks}/state_compat.py", "{work}"]},
+      {"name": "subs-pick-smoke", "argv": ["/usr/bin/python3", "-I", "{checks}/subs_pick_smoke.py", "{work}"]}
+    ],
+    "tests": {
+      "argv": ["/usr/bin/python3", "-I", "-m", "unittest", "discover", "-s", "tests", "-q"],
+      "count_regex": "Ran (\\d+) tests?",
+      "min": 9
+    }
+  },
+  "sandbox": {"memory_max": "512M", "tasks_max": 64, "runtime_max_sec": 300, "path": "/usr/bin:/bin"},
+  "health": {
+    "timeout": 120,
+    "poll": 5,
+    "commands": [
+      {"name": "control_state импортируется", "argv": ["/usr/bin/python3", "-I", "-c",
+        "import sys; sys.path.insert(0, '/usr/local/bin'); import control_state"]},
+      {"name": "subs-pick выбирает подписку", "argv": ["/usr/bin/python3", "-I", "/usr/local/bin/subs-pick", "--decide",
+        "{\"order\": \"first\", \"subs\": [{\"id\": \"a\", \"state\": null, \"caps\": {}}, {\"id\": \"b\", \"state\": null, \"caps\": {}}]}"]}
+    ]
+  },
+  "dependencies": {
+    "tools": ["python3"],
+    "state_files": ["/home/agents/.local/state/multica-control/controls.json"]
+  }
+}

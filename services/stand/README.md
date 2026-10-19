@@ -18,6 +18,7 @@
 | `static-server.mjs` | `/opt/stand/static-server.mjs` | раздаёт статику стендов и артефактов (`--hosts` — режим артефактов) |
 | `artifact-shells/*.html` | `/opt/stand/artifact-shells/` | оболочки, в которые `stand art publish` заворачивает markdown / mermaid / svg / jsx |
 | `systemd/*` | `/etc/systemd/system/` | `stand-router` (:8093), `stand-artifacts` (:8094), таймеры `stand-gc` и `stand-follow` |
+| `stand-seed` | `/usr/local/bin/stand-seed` | справочники стенда после пересборки (`/etc/stand/seed.json`, таймер `stand-seed`); перенесено из сторожа конвейера |
 | `SKILL.md` | скилл multica `stand` | инструкция агентам |
 
 ## Что не здесь
@@ -44,4 +45,5 @@ systemctl restart stand-router stand-artifacts
 ```
 
 Проверка до выкатки: `bash -n stand`, `python3 -m py_compile stand-router.py stand-mcp`,
+`python3 -I -m unittest discover -s tests -q` (stand-seed),
 `node --check static-server.mjs`.
