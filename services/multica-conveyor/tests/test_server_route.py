@@ -26,6 +26,7 @@ class NoRouteMachinery(unittest.TestCase):
     def test_возможности_без_полосы_маршрутов(self):
         features = c.CAPABILITIES['features']
         self.assertIn('server-route-gate', features)
+        self.assertIn('route-accept-step', features)
         for gone in ('routes', 'route-failures', 'route-gate'):
             self.assertNotIn(gone, features)
 
@@ -54,6 +55,12 @@ class RouteGate(unittest.TestCase):
                 self.assertIsNotNone(why)
                 if expected != 'маршрут выключен':
                     self.assertIn(expected, why)
+
+    def test_с_шагом_accept_сторож_не_вливает_и_не_будит(self):
+        cv = conveyor('dev,qa,review,accept,close')
+        self.assertIn('accept', c.route_gate(self.issue, cv))
+        self.assertFalse(c.route_problem(cv))
+        self.assertFalse(c.route_problem(conveyor('dev,qa,review,accept,close', at='accept', status='active')))
 
     def test_metadata_route_не_читается(self):
         issue = {'metadata': {'commit': 'a' * 40, 'route': 'dev:Бэкенд,review:Техдиректор,close:Тимлид', 'step': 'close'}}

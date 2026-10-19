@@ -16,6 +16,7 @@
    шаг `review`, и маршрут завершён на `close` (QA, если он в маршруте, идёт до review/close) — решение Евгения
    19.10.2026: в `main` вливает сторож, но только после review. Маршрут ведёт Multica, сторож его только читает.
    Маршрут ещё идёт — задача ждёт молча; завершён без review, выключен или его нет — один раз лидеру.
+   В маршруте есть шаг `accept` — проверку и слияние делает он (демон multica), сторож такую задачу не вливает.
    Перед слиянием задача и маршрут перечитываются: сменился коммит, маршрут вернули или задачу отменили — не вливается.
    Зелёно — тот же коммит вливается в `base` (`--no-ff`, хвост сообщения `commit_ref`), задача уходит в «Готово».
    Красно или конфликт — комментарий исполнителю задачи (агенту из assignee; задача на скваде — лидеру) с хвостом
@@ -79,7 +80,7 @@ EVENTS_KEEP = 400
 # Что умеет этот файл: по --capabilities внешний выкатчик решает, какие таймеры включать.
 CAPABILITIES = {'schema': 1, 'lanes': ['epics', 'providers'],
                 'features': ['accept-log', 'acceptance-env', 'accept-kill-group', 'accept-jobs', 'accept-metadata',
-                             'quota-retry-ledger', 'server-route-gate']}
+                             'quota-retry-ledger', 'server-route-gate', 'route-accept-step']}
 ACCEPT_LOG_KEEP_DAYS = 30
 KILL_GRACE = 5
 # Задача приёмки: queued — отдана atd, running/waiting — идёт (waiting — ждёт общий ресурс), остальное — итог.
@@ -297,6 +298,8 @@ def route_gate(issue, conveyor):
     завершён на `close`. Маршрут ведёт Multica; сторож его только читает."""
     if not conveyor or conveyor.get('status') == 'disabled':
         return 'нет маршрута (`multica issue conveyor`): вливание только после review по маршруту'
+    if 'accept' in {n.get('step') for n in conveyor.get('route') or []}:
+        return 'приёмку и слияние ведёт шаг `accept` маршрута multica'
     if 'review' not in {n.get('step') for n in conveyor.get('route') or []}:
         return 'в маршруте нет шага review: без review сторож не вливает, добавь `review:Техдиректор` перед `close`'
     if conveyor.get('step') != 'close' or conveyor.get('status') != 'completed':
@@ -310,6 +313,8 @@ def route_gate(issue, conveyor):
 
 def route_problem(conveyor):
     """Маршрута не дождаться (его нет, выключен или завершён без review) — нужен лидер; иначе задача ждёт молча."""
+    if conveyor and 'accept' in {n.get('step') for n in conveyor.get('route') or []}:
+        return False  # вливает шаг accept; не влито — это его отчёт, а не забота сторожа
     return not conveyor or conveyor.get('status') in ('disabled', 'completed')
 
 
