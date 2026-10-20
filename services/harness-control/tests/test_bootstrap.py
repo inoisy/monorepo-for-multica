@@ -63,11 +63,13 @@ class Scripts(unittest.TestCase):
                     and 'Special user nobody' not in l and not l.startswith('/etc/systemd/system/')]
         self.assertEqual(problems, [], r.stderr)
 
-    def test_обновление_снимает_политику_сторожа(self):
+    def test_обновление_снимает_снятые_компоненты(self):
         text = (BOOT / 'install.sh').read_text()
-        self.assertIn('for stale in multica-conveyor', text)
-        self.assertIn('COMPONENTS=(harness-canary control-state)', text)
+        self.assertIn('for stale in multica-conveyor control-state', text)
+        self.assertIn('COMPONENTS=(harness-canary)', text)
         self.assertNotIn('multica-provider', text)
+        self.assertEqual(sorted(p.stem for p in (PKG / 'policy.d').glob('*.json')), ['harness-canary'])
+        self.assertFalse((PKG / 'checks' / 'control-state').exists())
 
     def test_таймер_canary_ставится_выключенным(self):
         plan = check_output().stdout

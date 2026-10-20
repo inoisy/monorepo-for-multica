@@ -63,9 +63,6 @@ imported into Multica from its GitHub path.
   static server. Bash, Python, Node.js, no build step. Deployed by hand by the
   server owner. See `services/stand/README.md`.
 
-- `services/control-state/` — shared subscriptions module `control_state.py` used by
-  `subs-pick` and the control panel. Rolled out through `services/harness-control`
-  (component `control-state`).
 - `services/conveyor-retire/` — one-time retirement of the former pipeline watchdog,
   whose work (routes, acceptance, epic stages, retries) moved into multica: transfer of its
   targets and the host-side removal with backup and rollback.

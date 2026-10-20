@@ -1,32 +1,36 @@
-# Выкладка control-state и снятие сторожа
+# Снятие control-state
 
-Пакет harness-control с компонентом `control-state` вместо `multica-conveyor`. Ставится после того, как сторож снят
-(`services/conveyor-retire/README.md`): до снятия сторож и его таймеры продолжают жить на прежней политике.
+Пакет harness-control только с `harness-canary`. Компонент `control-state` (общий модуль подписок `control_state.py`)
+снят: после этапа B подписок (20.10.2026) подписки живут в multica, `/usr/local/bin/subs-pick` удалён, пульт
+`multica-control` выключен (`disable`). Модуль больше никто не импортирует, а health компонента («subs-pick выбирает
+подписку») был всегда красным. Ставится после этапа B.
+
+До него этот файл описывал выкладку `control-state` вместо сторожа конвейера (`multica-conveyor`) — см. историю git.
 
 ## Проверка перед выкладкой
 
 ```sh
-python3 -I -m unittest discover -s services/control-state/tests -q
-python3 -I services/harness-control/checks/control-state/state_compat.py services/control-state
-python3 -I services/harness-control/checks/control-state/subs_pick_smoke.py services/control-state   # на хосте с subs-pick
 python3 -I -m unittest discover -s services/harness-control/tests -q
 ```
 
-`control_state.py` перенесён из `services/multica-conveyor` без изменений: установленный модуль и кандидат совпадают
-побайтно, выкладка ничего не меняет в работе `subs-pick` и пульта.
+На хосте убедиться, что модуль никто не импортирует:
+
+```sh
+grep -rlE 'import control_state|from control_state' /usr/local/bin /usr/local/lib /opt /home/agents/.local/bin 2>/dev/null
+systemctl is-enabled multica-control.service    # disabled
+```
 
 ## Шаги
 
-1. Оператор: `bash services/harness-control/bootstrap/build-release.sh <коммит>`, `install.sh --check`, затем
-   `install.sh --upgrade`. Обновление снимает `/etc/harness-control/policy.d/multica-conveyor.json` и записывает
-   baseline `control-state` из установленных файлов.
-2. `harness-control inspect control-state`: политика, drift (должен быть чистым), health.
-3. Дальнейшие правки модуля — обычным путём: `validate control-state <sha40>` → `deploy … --validation … --digest …`.
-   Изменение `/opt/multica-control/control_state.py` перезапускает пульт.
-4. Расписание канарейки выключено (README, «Harness-canary: ручная проверка»): для проверки пути выкладки таймер
-   включает оператор.
+1. Оператор: бэкап `/etc/harness-control`, `/usr/local/lib/harness-control`, `/var/lib/harness-control`; затем
+   `bash services/harness-control/bootstrap/build-release.sh <коммит>`, `install.sh --check`, `install.sh --upgrade`.
+   Обновление снимает `/etc/harness-control/policy.d/{multica-conveyor,control-state}.json` и
+   `/usr/local/lib/harness-control/checks/{multica-conveyor,control-state}/`.
+2. `harness-control inspect`: в списке только `harness-canary` (её health красный, пока таймер выключен).
+3. Файлы `/usr/local/bin/control_state.py` и `/opt/multica-control/` не трогаются — они нужны `rollback.sh` этапа B
+   (`/var/backups/multica-subs-b.<время>/`).
 
 ## Откат
 
-`install.sh` прежнего пакета (`--upgrade`) возвращает политику `multica-conveyor`; файлы сторожа возвращает
-`rollback.sh` из `/var/backups/conveyor-retire.<время>/`.
+`install.sh --upgrade` прежнего пакета возвращает политику и проверки `control-state`; baseline компонента в
+`/var/lib/harness-control` установщик не удаляет.

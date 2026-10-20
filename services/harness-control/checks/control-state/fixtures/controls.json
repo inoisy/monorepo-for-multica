@@ -1,8 +1,0 @@
-{
-  "chains": {"00000000-0000-0000-0000-000000000001": {"profiles": [{"runtime": "r1", "model": "m1", "level": "high"}]}},
-  "agents": {},
-  "events": [{"t": "2026-10-17T10:00:00+00:00", "kind": "pause", "text": "fixture"}],
-  "paused": false,
-  "pause_at": "",
-  "pause_by": ""
-}
