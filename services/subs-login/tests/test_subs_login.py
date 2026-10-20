@@ -165,6 +165,16 @@ class CodexLoginTest(Base):
         self.assertEqual(sl.login_state(self.cfg, self.account('codex-a')), 'never')
 
 
+    def test_unreadable_credential_is_check_failed(self):
+        self.key.parent.mkdir(exist_ok=True)
+        self.key.write_text('k')
+        self.key.parent.chmod(0o000)
+        self.addCleanup(self.key.parent.chmod, 0o755)
+        if os.access(self.key.parent, os.X_OK):
+            self.skipTest('root reads everything')
+        self.assertEqual(sl.login_state(self.cfg, self.account('or-a')), 'check_failed')
+
+
 class SecretTest(Base):
     def test_claude_token_saved_without_logging_value(self):
         out = self.logins.put_secret('claude-a', self.account('claude-a'), '  sk-ant-oat01-PASTED-SECRET  ', 'o@x')
