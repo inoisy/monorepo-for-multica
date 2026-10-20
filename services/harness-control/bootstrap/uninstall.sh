@@ -43,4 +43,4 @@ install -d -m 0700 "$BACKUP"
 echo '5. файлы'
 rm -f /usr/local/sbin/harness-priv /usr/local/bin/harness-control /usr/local/bin/harness-control-mcp
 rm -rf "$LIB"
-echo 'готово. multica-provider.timer и установленные через harness версии не тронуты; baseline восстановлен только с --restore-baseline.'
+echo 'готово. Установленные через harness версии не тронуты; baseline восстановлен только с --restore-baseline.'

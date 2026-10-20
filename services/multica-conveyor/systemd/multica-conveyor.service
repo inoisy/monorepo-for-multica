@@ -1,8 +1,0 @@
-[Unit]
-Description=multica: конвейер эпиков — следующая стадия скваду
-
-[Service]
-Type=oneshot
-User=agents
-ExecStart=/usr/local/bin/multica-conveyor
-TimeoutStartSec=3600
