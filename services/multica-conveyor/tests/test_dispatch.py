@@ -28,6 +28,8 @@ class FakeMultica:
         self.writes = []
         self.fail = None        # 'before' — запись не дошла, 'after' — дошла, ответ потерян
         self.stale = False      # чтение отдаёт снимок до последней записи
+        self.server_squad = None  # стадии эпика назначает сервер multica (`issue stages`)
+        self.stages_missing = False  # старый multica без `issue stages`
 
     def __call__(self, *args, write=False):
         if write:
@@ -53,6 +55,10 @@ class FakeMultica:
             return {'stages': [{'stage': 1, 'issues': copy.deepcopy(list(issues.values()))}], 'unstaged': []}
         if args[:2] == ('issue', 'get'):
             return copy.deepcopy(issues[args[2]])
+        if args[:2] == ('issue', 'stages'):
+            if self.stages_missing:
+                raise RuntimeError('multica issue stages: unknown command "stages"')
+            return {'issue_id': args[2], 'squad_id': self.server_squad}
         if args[:2] == ('issue', 'runs'):
             return copy.deepcopy(self.runs.get(args[2], []))
         raise AssertionError(f'непредусмотренное чтение: {args}')
@@ -86,6 +92,18 @@ class Dispatch(unittest.TestCase):
 
     def journal(self):
         return json.loads(self.state.read_text()).get('_dispatch', {}) if self.state.exists() else {}
+
+    def test_стадии_назначает_сервер_сторож_не_назначает(self):
+        api = FakeMultica({'identifier': 'PKG-1', 'status': 'backlog'})
+        api.server_squad = 'squad'
+        self.tick(api)
+        self.assertEqual(api.assigns(), [])
+
+    def test_старый_multica_без_issue_stages_назначает_сторож(self):
+        api = FakeMultica({'identifier': 'PKG-1', 'status': 'backlog'})
+        api.stages_missing = True
+        self.tick(api)
+        self.assertEqual(len(api.assigns('PKG-1')), 1)
 
     def test_повтор_тика_и_рестарт_не_назначают_второй_раз(self):
         api = FakeMultica({'identifier': 'PKG-1', 'status': 'backlog'})

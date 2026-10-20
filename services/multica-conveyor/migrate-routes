@@ -1,0 +1,129 @@
+#!/usr/bin/python3 -I
+"""Перевод открытых задач с маршрутом сторожа (`metadata.route`/`step`) на серверный маршрут Multica.
+
+Запускать после выкатки сторожа, который маршрут не ведёт: иначе старый сторож и сервер поведут задачу вдвоём.
+По умолчанию — сухой прогон: печатает, что сделал бы. `--apply` включает маршрут и чистит metadata.
+
+    MULTICA_WORKSPACE_ID=<ws> migrate-routes STT-239 [--apply]
+
+Берутся сама задача и её подзадачи (`issue children`). Для каждой открытой задачи с `metadata.route`:
+- `step` — шаг, с которого маршрут продолжится (`--from-step`); `route` уходит в `--route` как есть;
+- `verdict` уже записан (шаг сдан, но сторож его не передал) или `step` = `close` (маршрут пройден, ждёт приёмки) —
+  задача не включается, а попадает в отчёт: следующий шаг решает лидер (`multica issue conveyor enable <задача>
+  --route … --from-step <шаг>`; для пройденной без серверного маршрута — `--from-step review`);
+- маршрут уже включён на сервере — только чистка metadata;
+- включение отклонено (идёт ран, агент без runtime, нет прав) — в отчёт, metadata не трогается.
+После включения из metadata удаляются `route`, `pos`, `round`, `verdict`. `step` с этого момента пишет сервер, `branch`
+и `commit` остаются — по ним сторож принимает задачу. Код выхода 1 — в отчёте есть задачи, которые не переведены.
+"""
+import json, os, re, subprocess, sys
+
+# `step` остаётся: серверный маршрут сам пишет его на каждом шаге.
+ROUTE_KEYS = ('route', 'pos', 'round', 'verdict')
+CLOSED = {'done', 'cancelled', 'canceled'}
+
+
+def parse_json(out):
+    out = out.strip()
+    if not out.startswith(('{', '[')):
+        return {}
+    return json.JSONDecoder().raw_decode(out)[0]
+
+
+def multica(*a):
+    r = subprocess.run(['multica', *a, '--output', 'json'], capture_output=True, text=True, timeout=120, env=os.environ)
+    if r.returncode:
+        raise RuntimeError(f'multica {" ".join(a[:3])}: {r.stderr.strip()[:300]}')
+    return parse_json(r.stdout)
+
+
+def unwrap(d):
+    return d.get('issue', d) if isinstance(d, dict) else d
+
+
+def issues_of(m, keys):
+    """Задачи и их подзадачи, по одной на идентификатор, в порядке обхода."""
+    seen = {}
+    for key in keys:
+        root = unwrap(m('issue', 'get', key))
+        seen.setdefault(root['identifier'], root)
+        children = m('issue', 'children', key)
+        for i in [i for st in children.get('stages', []) for i in st['issues']] + children.get('unstaged', []):
+            seen.setdefault(i['identifier'], i)
+    return list(seen.values())
+
+
+def has_conveyor(m, key):
+    try:
+        cv = m('issue', 'conveyor', 'get', key)
+    except RuntimeError as e:
+        if re.search(r'no route|not found|404', str(e), re.I):
+            return False
+        raise
+    return cv.get('status') not in (None, 'disabled')
+
+
+def plan(issue):
+    """('enable', from_step) | ('clean', None) | ('skip', причина) | (None, None) — задаче перевод не нужен."""
+    meta = issue.get('metadata') or {}
+    if not meta.get('route'):
+        return None, None
+    if (issue.get('status') or issue.get('status_category')) in CLOSED:
+        return 'clean', None
+    if meta.get('verdict'):
+        return 'skip', f"шаг `{meta.get('step')}` сдан с verdict `{meta['verdict']}`, но не передан — следующий шаг решает лидер"
+    if meta.get('step') == 'close':
+        return 'skip', 'маршрут пройден (`close`), ветка ждёт приёмки — включить с `--from-step review` или решить лидеру'
+    if not meta.get('step'):
+        return 'skip', 'в metadata нет `step`'
+    return 'enable', meta['step']
+
+
+def migrate(m, keys, apply=False, out=print):
+    """Возвращает список (задача, причина) для отчёта: что не переведено."""
+    report = []
+    for issue in issues_of(m, keys):
+        key, meta = issue['identifier'], issue.get('metadata') or {}
+        action, arg = plan(issue)
+        if action is None:
+            continue
+        try:
+            if action == 'skip':
+                report.append((key, arg))
+                out(f'{key}: пропуск — {arg}')
+                continue
+            if action == 'enable' and has_conveyor(m, key):
+                action = 'clean'
+            if action == 'enable':
+                out(f"{key}: enable --route {meta['route']} --from-step {arg}")
+                if apply:
+                    m('issue', 'conveyor', 'enable', key, '--route', meta['route'], '--from-step', arg)
+            present = [k for k in ROUTE_KEYS if k in meta]
+            out(f"{key}: metadata delete {' '.join(present)}")
+            if apply:
+                for k in present:
+                    m('issue', 'metadata', 'delete', key, '--key', k)
+        except RuntimeError as e:
+            report.append((key, str(e)[:300]))
+            out(f'{key}: не переведена — {str(e)[:300]}')
+    return report
+
+
+def main(argv):
+    apply = '--apply' in argv
+    keys = [a for a in argv if not a.startswith('--')]
+    if not keys or not os.environ.get('MULTICA_WORKSPACE_ID'):
+        print(__doc__)
+        return 2
+    if not apply:
+        print('Сухой прогон: ничего не меняется. С --apply — включить маршруты и почистить metadata.')
+    report = migrate(multica, keys, apply)
+    if report:
+        print('\nНе переведены:')
+        for key, why in report:
+            print(f'  {key}: {why}')
+    return 1 if report else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
