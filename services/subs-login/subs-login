@@ -121,10 +121,19 @@ def login_state(cfg, account, run=subprocess.run):
         if 'not logged in' in text:
             return 'revoked'
         return 'logged_in' if r.returncode == 0 and 'logged in' in text else 'check_failed'
-    if not path.exists() or not path.read_bytes().strip():
+    try:
+        os.stat(path)
+        value = path.read_bytes().strip()
+    except FileNotFoundError:
+        value = b''
+    except OSError:
+        # Учётка, которую пользователь помощника не читает (например /etc/openrouter/key у root):
+        # статус не узнать, но список аккаунтов из-за неё не падает.
+        return 'check_failed'
+    if not value:
         return 'never'
     if account['auth'] == 'api_key':
-        ok = probe_key(cfg, account['provider'], path.read_text().strip())
+        ok = probe_key(cfg, account['provider'], value.decode(errors='replace'))
         return 'unchecked' if ok is None else ('logged_in' if ok else 'revoked')
     return 'unchecked'
 
