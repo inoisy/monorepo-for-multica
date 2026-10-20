@@ -21,7 +21,7 @@ ETC=/etc/harness-control
 STATE=/var/lib/harness-control
 SYSTEMD=/etc/systemd/system
 SUDOERS=/etc/sudoers.d/harness-control
-COMPONENTS=(harness-canary control-state)
+COMPONENTS=(harness-canary)
 
 run() {
   local shown="$*"
@@ -90,10 +90,12 @@ fi
 while read -r f; do
   case $f in policy.d/*) run install -o root -g root -m 0644 "$PKG/$f" "$ETC/$f" ;; esac
 done < <(package_files)
-# Компоненты, которых больше нет в пакете: сторож конвейера снят (маршрут, приёмка и стадии теперь в multica),
-# его политика не должна оставаться в силе после обновления.
-for stale in multica-conveyor; do
+# Компоненты, которых больше нет в пакете, — их политика и проверки не должны оставаться в силе после обновления:
+# сторож конвейера снят (маршрут, приёмка и стадии теперь в multica); control-state снят с этапом B подписок
+# (подписки в multica, subs-pick удалён, пульт выключен — модуль больше никто не импортирует).
+for stale in multica-conveyor control-state; do
   if [[ -e $ETC/policy.d/$stale.json ]]; then run rm -f "$ETC/policy.d/$stale.json"; fi
+  if [[ -d $LIB/checks/$stale ]]; then run rm -rf "$LIB/checks/$stale"; fi
 done
 
 # --- юниты ------------------------------------------------------------------------------------
