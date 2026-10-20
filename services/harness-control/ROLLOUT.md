@@ -23,6 +23,8 @@ python3 -I -m unittest discover -s services/harness-control/tests -q
 2. `harness-control inspect control-state`: политика, drift (должен быть чистым), health.
 3. Дальнейшие правки модуля — обычным путём: `validate control-state <sha40>` → `deploy … --validation … --digest …`.
    Изменение `/opt/multica-control/control_state.py` перезапускает пульт.
+4. Расписание канарейки выключено (README, «Harness-canary: ручная проверка»): для проверки пути выкладки таймер
+   включает оператор.
 
 ## Откат
 

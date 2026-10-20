@@ -69,6 +69,11 @@ class Scripts(unittest.TestCase):
         self.assertIn('COMPONENTS=(harness-canary control-state)', text)
         self.assertNotIn('multica-provider', text)
 
+    def test_таймер_canary_ставится_выключенным(self):
+        plan = check_output().stdout
+        self.assertNotRegex(plan, r'enable[^\n]*harness-canary')
+        self.assertIn('harness-canary.timer ставится выключенным', plan)
+
 
 class CheckMode(unittest.TestCase):
     def test_check_без_root_печатает_план_и_sha_и_ничего_не_меняет(self):
