@@ -1,0 +1,6 @@
+[Unit]
+Description=Загрузка справочников стендов после пересборки
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/stand-seed

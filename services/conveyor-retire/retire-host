@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Снятие сторожа конвейера с хоста (root). Маршрут, приёмка, стадии и повторы теперь в multica.
+#   retire-host --check            план, ничего не меняет
+#   retire-host [--with-pult]      снять; с --with-pult — ещё остановить пульт multica-control
+# Остаются: control_state.py (его импортирует subs-pick при старте каждого рана) и subs-pick; пульт — без --with-pult.
+# Всё снятое переносится в /var/backups/conveyor-retire.<время>/ вместе с rollback.sh, который возвращает файлы и
+# включает обратно то, что было включено.
+# Для тестов: ROOT — корень вместо /, SYSTEMCTL — команда вместо systemctl.
+set -euo pipefail
+
+ROOT=${ROOT:-}
+SYSTEMCTL=${SYSTEMCTL:-systemctl}
+MODE=retire
+PULT=0
+for arg in "$@"; do
+  case $arg in
+    --check) MODE=check ;;
+    --with-pult) PULT=1 ;;
+    *) echo "usage: retire-host [--check] [--with-pult]" >&2; exit 2 ;;
+  esac
+done
+
+UNITS=(multica-conveyor.timer multica-conveyor.service multica-provider.timer multica-provider.service
+       multica-fallback.timer multica-fallback.service)
+FILES=(/usr/local/bin/multica-conveyor /usr/local/bin/mconv /usr/local/bin/multica-fallback /etc/multica-conveyor.json)
+for u in "${UNITS[@]}"; do FILES+=("/etc/systemd/system/$u"); done
+if [[ $PULT == 1 ]]; then UNITS+=(multica-control.service); FILES+=(/etc/systemd/system/multica-control.service); fi
+
+run() { printf '  %s\n' "$*"; if [[ $MODE != check ]]; then "$@"; fi; }
+
+if [[ $MODE != check && -z $ROOT && $(id -u) != 0 ]]; then
+  echo 'Нужен root: sudo retire-host' >&2; exit 1
+fi
+if $SYSTEMCTL is-active --quiet multica-conveyor.service 2>/dev/null; then
+  echo 'идёт тик сторожа (multica-conveyor.service активен); дождитесь конца и повторите' >&2; exit 1
+fi
+
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+BACKUP=$ROOT/var/backups/conveyor-retire.$STAMP
+echo "снятие сторожа конвейера ($MODE)"
+echo "бэкап: $BACKUP"
+echo 'план:'
+run mkdir -p "$BACKUP/files"
+enabled=()
+for u in "${UNITS[@]}"; do
+  if $SYSTEMCTL is-enabled --quiet "$u" 2>/dev/null; then enabled+=("$u"); fi
+  if [[ -e $ROOT/etc/systemd/system/$u ]] || $SYSTEMCTL cat "$u" >/dev/null 2>&1; then
+    run "$SYSTEMCTL" disable --now "$u"
+  fi
+done
+moved=()
+for f in "${FILES[@]}"; do
+  if [[ -e $ROOT$f || -L $ROOT$f ]]; then
+    run mkdir -p "$BACKUP/files$(dirname -- "$f")"
+    run mv -- "$ROOT$f" "$BACKUP/files$f"
+    moved+=("$f")
+  fi
+done
+run "$SYSTEMCTL" daemon-reload
+
+if [[ $MODE == check ]]; then
+  echo "будут сняты: ${moved[*]:-ничего}"
+  exit 0
+fi
+
+{
+  echo '#!/usr/bin/env bash'
+  echo '# Откат снятия сторожа: вернуть файлы и включить то, что было включено.'
+  echo 'set -euo pipefail'
+  printf 'ROOT=%q\nSYSTEMCTL=%q\nBACKUP=%q\n' "$ROOT" "$SYSTEMCTL" "$BACKUP"
+  for f in "${moved[@]}"; do
+    printf 'mkdir -p "$ROOT%s" && mv -- "$BACKUP/files%s" "$ROOT%s"\n' "$(dirname -- "$f")" "$f" "$f"
+  done
+  echo '"$SYSTEMCTL" daemon-reload'
+  for u in "${enabled[@]}"; do
+    case $u in
+      *.timer|multica-control.service) printf '"$SYSTEMCTL" enable --now %q\n' "$u" ;;
+      *) printf '"$SYSTEMCTL" enable %q\n' "$u" ;;
+    esac
+  done
+  echo 'echo "сторож возвращён"'
+} > "$BACKUP/rollback.sh"
+chmod 0700 "$BACKUP/rollback.sh"
+printf '%s\n' "${enabled[@]}" > "$BACKUP/enabled-units"
+echo "готово. Откат: sudo $BACKUP/rollback.sh"
+echo 'Состояние сторожа (~agents/.local/state/multica-conveyor) не удалялось.'

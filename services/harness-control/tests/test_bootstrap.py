@@ -57,21 +57,17 @@ class Scripts(unittest.TestCase):
         if not shutil.which('systemd-analyze'):
             self.skipTest('нет systemd-analyze')
         units = [str(p) for p in sorted(BOOT.glob('*.service')) + sorted(BOOT.glob('*.timer'))]
-        units += [str(PKG.parent / 'multica-conveyor' / 'systemd' / n) for n in ('multica-provider.service', 'multica-provider.timer')]
         r = subprocess.run(['systemd-analyze', 'verify', *units], capture_output=True, text=True)
         # исполняемых файлов ещё нет на этой машине — это единственное допустимое замечание
         problems = [l for l in r.stderr.splitlines() if l.strip() and 'is not executable: No such file' not in l
                     and 'Special user nobody' not in l and not l.startswith('/etc/systemd/system/')]
         self.assertEqual(problems, [], r.stderr)
 
-    def test_таймер_провайдеров_ставится_выключенным(self):
-        plan = check_output().stdout
-        self.assertNotRegex(plan, r'enable[^\n]*multica-provider')
-        self.assertIn('multica-provider.timer ставится выключенным', plan)
-
-    def test_provider_units_запускают_тот_же_сторож(self):
-        text = (PKG.parent / 'multica-conveyor' / 'systemd' / 'multica-provider.service').read_text()
-        self.assertIn('ExecStart=/usr/local/bin/multica-conveyor --providers-only', text)
+    def test_обновление_снимает_политику_сторожа(self):
+        text = (BOOT / 'install.sh').read_text()
+        self.assertIn('for stale in multica-conveyor', text)
+        self.assertIn('COMPONENTS=(harness-canary control-state)', text)
+        self.assertNotIn('multica-provider', text)
 
 
 class CheckMode(unittest.TestCase):

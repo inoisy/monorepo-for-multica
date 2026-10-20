@@ -4,7 +4,8 @@
 политики, которую задаёт оператор. Агент не получает общий root: оператор один раз ставит фиксированный привилегированный
 вход, дальше агент сам проверяет, выкатывает и откатывает разрешённые версии.
 
-Первый этап: сторож конвейера вместе с полосой провайдеров (`multica-conveyor`) и тестовый `harness-canary`.
+Компоненты: общий модуль подписок `control_state.py` (`control-state`) и тестовый `harness-canary`. Сторож конвейера
+(`multica-conveyor`) снят — его работа перешла в multica (см. `services/conveyor-retire`); обновление пакета снимает его политику.
 Не входят: daemon и backend платформы (`multica-agents`, `multica-*` — всегда `forbidden_component`), самообновление
 harness-control, stand, пульт, guard'ы, MCP и навыки, бэкапы — они идут следующими стадиями.
 
@@ -65,9 +66,8 @@ harness-control, stand, пульт, guard'ы, MCP и навыки, бэкапы 
   `ProtectHome`, `InaccessiblePaths` на данные harness и sudoers, `MemoryMax`, `TasksMax`, `RuntimeMaxSec`; кандидат и
   checks примонтированы только на чтение, окружение пустое, `PATH` из политики. Глобальный лимит параллельных
   validate — `max_parallel_validate` в `/etc/harness-control/harness.json` (по умолчанию 1).
-- **Обязательные проверки сторожа**: контракт `--capabilities`, совместимость `state.json`/`controls.json`, smoke
-  `subs-pick` на `control_state.py` кандидата (его импортирует старт каждого рана claude/codex-reserve), затем собственные
-  тесты кандидата. Число тестов не меньше, чем у последней проверенной версии и порога `min` политики
+- **Обязательные проверки `control-state`**: совместимость `controls.json`, smoke `subs-pick` на `control_state.py`
+  кандидата (его импортирует старт каждого рана claude/codex-reserve), затем собственные тесты кандидата. Число тестов не меньше, чем у последней проверенной версии и порога `min` политики
   (`tests_decreased`).
 - **Deploy** проверяет: компонент в политике, validate успешен, digest и `policy_version` совпадают, хэш tar
   пересчитан, коммит достижим из `origin/main` (если не отключено оператором), компонент не в `degraded`. Всё это
@@ -119,10 +119,9 @@ harness-control, stand, пульт, guard'ы, MCP и навыки, бэкапы 
 - `main` монорепо защищена от прямой записи ключом агентов (см. «Условие безопасности»);
 - пакет собран оператором из проверенного коммита в каталоге root, а не взят готовым из каталога агента: между
   `--check` и установкой агент может поменять файлы в своём каталоге;
-- установленные файлы сторожа — те, что записаны в git как baseline: `sha256sum /usr/local/bin/multica-conveyor
-  /usr/local/bin/control_state.py /opt/multica-control/control_state.py` → `cfda92b7…`, `5736e0ed…`, `5736e0ed…`
-  (установщик записывает baseline из того, что лежит на хосте, и не сверяет хэши);
-- `mconv`, `subs-pick` и `multica-conveyor` не запускать от root: после установки `control_state.py` выкладывает
+- установленный `control_state.py` — тот, что ожидается как baseline: `sha256sum /usr/local/bin/control_state.py
+  /opt/multica-control/control_state.py` (установщик записывает baseline из того, что лежит на хосте, и не сверяет хэши);
+- `subs-pick` не запускать от root: после установки `control_state.py` выкладывает
   агент, и от root он исполнил бы код агента.
 
 ```sh

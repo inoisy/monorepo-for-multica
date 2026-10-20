@@ -1,0 +1,109 @@
+#!/usr/bin/python3 -I
+"""Загрузка справочников стендов после пересборки: стенд с пустой базой получает справочники сам, без сторожа.
+
+Конфиг — /etc/stand/seed.json (STAND_SEED_CONFIG): {"stands": [{"name", "url", "operator_principal", "sources"}]}
+(та же форма, что `stands` у прежнего сторожа конвейера). Сессия оператора — /var/lib/stand/seed-state.json.
+Запуск — stand-seed.timer раз в 2 минуты. --dry-run печатает решение и ничего не загружает.
+"""
+import json, os, re, sys, urllib.error, urllib.request
+from pathlib import Path
+
+CONFIG = Path(os.environ.get('STAND_SEED_CONFIG', '/etc/stand/seed.json'))
+STATE = Path(os.environ.get('STAND_SEED_STATE', '/var/lib/stand/seed-state.json'))
+
+
+def needs_seed(status):
+    """Справочники стенда ни разу не загружались и загрузка сейчас не идёт — свежая база после пересборки."""
+    rows = status.get('items', [])
+    if not rows:
+        return True
+    return any(r.get('lastSuccessAt') is None and (r.get('lastRun') or {}).get('status') not in ('running', 'queued', 'pending')
+               for r in rows)
+
+
+class Stand:
+    """HTTP-клиент стенда: тестовый вход оператором (cookie + CSRF), сессия переиспользуется между запусками."""
+
+    def __init__(self, url, principal, saved, opener=urllib.request.urlopen):
+        self.url, self.principal, self.saved, self.opener = url.rstrip('/'), principal, saved, opener
+
+    def call(self, method, path, body=None):
+        headers = {'Origin': self.url, 'Accept': 'application/json'}
+        if body is not None:
+            headers['Content-Type'] = 'application/json'
+        if self.saved.get('cookie'):
+            headers['Cookie'] = 'resource_session=' + self.saved['cookie']
+            headers['x-csrf-token'] = self.saved.get('csrf', '')
+        req = urllib.request.Request(self.url + path, data=None if body is None else json.dumps(body).encode(),
+                                     headers=headers, method=method)
+        try:
+            with self.opener(req, timeout=30) as r:
+                raw = r.read().decode() or '{}'
+                return r.status, json.loads(raw) if raw.strip().startswith('{') else {}, r.headers.get_all('Set-Cookie') or []
+        except urllib.error.HTTPError as e:
+            return e.code, {}, []
+
+    def login(self):
+        self.saved.clear()
+        code, data, cookies = self.call('POST', '/auth/test/login', {'principalId': self.principal})
+        if code != 200:
+            raise RuntimeError(f'тестовый вход оператором: HTTP {code}')
+        for c in cookies:
+            m = re.match(r'resource_session=([^;]+)', c)
+            if m:
+                self.saved['cookie'] = m.group(1)
+        self.saved['csrf'] = data.get('csrfToken', '')
+
+    def authed(self, method, path, body=None):
+        code, data, _ = self.call(method, path, body)
+        if code in (401, 403):
+            self.login()
+            code, data, _ = self.call(method, path, body)
+        return code, data
+
+
+def run(cfg, state, dry=False, say=print, opener=urllib.request.urlopen):
+    """Один проход по стендам; возвращает число ошибок."""
+    errors = 0
+    for s in cfg.get('stands', []):
+        st = Stand(s['url'], s['operator_principal'], state.setdefault(s['name'], {}), opener)
+        try:
+            code, status = st.authed('GET', '/api/v1/sync/status')
+        except (RuntimeError, OSError) as e:
+            say(f"{s['name']}: {e}")
+            errors += 1
+            continue
+        if code != 200:
+            say(f"{s['name']}: статус справочников недоступен: HTTP {code}")
+            errors += 1
+            continue
+        if not needs_seed(status):
+            continue
+        sources = s.get('sources', ['sphere'])
+        say(f"{s['name']}: справочники пустые после пересборки — загружаю ({', '.join(sources)})")
+        if dry:
+            continue
+        for source in sources:
+            code, _ = st.authed('POST', f'/api/v1/sync/{source}', {})
+            if code not in (200, 202):
+                say(f"{s['name']}: загрузка {source} — HTTP {code}")
+                errors += 1
+    return errors
+
+
+def main(argv):
+    dry = '--dry-run' in argv
+    cfg = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+    state = json.loads(STATE.read_text()) if STATE.exists() else {}
+    errors = run(cfg, state, dry)
+    if not dry:
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATE.with_suffix('.tmp')
+        tmp.write_text(json.dumps(state))
+        os.chmod(tmp, 0o600)
+        tmp.replace(STATE)
+    return 1 if errors else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
