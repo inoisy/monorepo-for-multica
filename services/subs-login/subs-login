@@ -1,0 +1,370 @@
+#!/usr/bin/python3 -I
+"""Вход в подписки со страницы «Подписки» Multica: статус входа аккаунтов и перелогин без ssh.
+
+Хостовый помощник (systemd, User=agents, 127.0.0.1:8101); страница ходит к нему через Caddy
+(`handle_path /subs-login/*`). Сессию и роль проверяет по API multica той же cookie/токеном, что пришли в запросе:
+статус видят участники workspace, входит заново только owner.
+
+Аккаунты и пути учёток — из выгрузки таблиц «Подписок» (`subscriptions.json` пульта, поле `credential` строки),
+не из запроса. Вход идёт во временный каталог; рабочий файл подменяется атомарно (rename, права 600) только после
+успешной проверки. Брошенный или неудачный вход рабочую учётку не трогает; незавершённый вход убивается через
+15 минут. Один вход на аккаунт одновременно. Значения ключей и токенов не пишутся ни в журнал, ни в ответы.
+
+Конфиг — /etc/subs-login.json (SUBS_LOGIN_CONFIG), все ключи необязательны:
+  {"listen": "127.0.0.1:8101", "multica_url": "http://127.0.0.1:8080", "subs_file": "...", "journal": "...",
+   "codex": "codex", "login_timeout": 900,
+   "probes": {"<provider>": {"url": "https://…", "header": "Authorization", "prefix": "Bearer "}}}
+"""
+import json, os, re, secrets, shutil, signal, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+CONFIG = Path(os.environ.get('SUBS_LOGIN_CONFIG', '/etc/subs-login.json'))
+HOME = Path.home()
+DEFAULTS = {
+    'listen': '127.0.0.1:8101',
+    'multica_url': 'http://127.0.0.1:8080',
+    'subs_file': str(HOME / '.local/state/multica-control/subscriptions.json'),
+    'journal': str(HOME / '.local/state/subs-login/journal.jsonl'),
+    'codex': 'codex',
+    'login_timeout': 900,
+    # Quota endpoints that answer for a key; a provider without one shows "not checked".
+    'probes': {'openrouter': {'url': 'https://openrouter.ai/api/v1/key', 'header': 'Authorization', 'prefix': 'Bearer '}},
+}
+URL_RE = re.compile(r'https://\S+')
+CODE_RE = re.compile(r'\b[A-Z0-9]{4,5}-[A-Z0-9]{4,5}\b')
+LOGIN_AUTHS = ('codex_auth', 'claude_oauth', 'api_key')
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    if CONFIG.exists():
+        cfg.update(json.loads(CONFIG.read_text()))
+    return cfg
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+# ── accounts ────────────────────────────────────────────────────────────────
+
+def accounts(cfg):
+    """Строки таблицы подписок, у которых есть вход: id → {provider, auth, credential}."""
+    path = Path(cfg['subs_file'])
+    data = {}
+    for candidate in (path, path.with_name(path.stem + '.last' + path.suffix)):
+        try:
+            data = json.loads(candidate.read_text())
+            break
+        except (OSError, ValueError):
+            continue
+    items = ((data.get('tables') or {}).get('items')) or []
+    return {i['id']: {'provider': i.get('provider', ''), 'auth': i.get('auth', ''), 'credential': i.get('credential', '')}
+            for i in items if i.get('id') and i.get('auth') in LOGIN_AUTHS and i.get('credential')}
+
+
+def credential_path(account):
+    return Path(os.path.expanduser(account['credential']))
+
+
+def codex_home(account):
+    """CODEX_HOME учётки: каталог файла auth.json или сам каталог."""
+    p = credential_path(account)
+    return p.parent if p.suffix == '.json' else p
+
+
+def replace_atomically(target, data):
+    """Подменить файл учётки: временный файл в том же каталоге, права 600, rename."""
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix='.subs-login-')
+    try:
+        with os.fdopen(fd, 'wb') as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def probe_key(cfg, provider, key):
+    """True/False — ключ принят/отклонён проверкой квоты; None — проверки для провайдера нет или она не ответила."""
+    probe = (cfg.get('probes') or {}).get(provider)
+    if not probe:
+        return None
+    req = urllib.request.Request(probe['url'], headers={probe.get('header', 'Authorization'): probe.get('prefix', 'Bearer ') + key})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return 200 <= r.status < 300
+    except urllib.error.HTTPError as e:
+        return False if e.code in (401, 403) else None
+    except OSError:
+        return None
+
+
+def login_state(cfg, account, run=subprocess.run):
+    """logged_in | revoked | never | check_failed | unchecked."""
+    path = credential_path(account)
+    if account['auth'] == 'codex_auth':
+        if not (codex_home(account) / 'auth.json').exists():
+            return 'never'
+        try:
+            r = run([cfg['codex'], 'login', 'status'], capture_output=True, text=True, timeout=30,
+                    env={**os.environ, 'CODEX_HOME': str(codex_home(account))})
+        except (OSError, subprocess.TimeoutExpired):
+            return 'check_failed'
+        text = (r.stdout + r.stderr).lower()
+        if 'not logged in' in text:
+            return 'revoked'
+        return 'logged_in' if r.returncode == 0 and 'logged in' in text else 'check_failed'
+    if not path.exists() or not path.read_bytes().strip():
+        return 'never'
+    if account['auth'] == 'api_key':
+        ok = probe_key(cfg, account['provider'], path.read_text().strip())
+        return 'unchecked' if ok is None else ('logged_in' if ok else 'revoked')
+    return 'unchecked'
+
+
+# ── login sessions ──────────────────────────────────────────────────────────
+
+class Login:
+    """Один вход в аккаунт: device-auth Codex во временном CODEX_HOME или вставка токена/ключа."""
+
+    def __init__(self, account_id, account, by):
+        self.id = secrets.token_hex(8)
+        self.account_id, self.account, self.by = account_id, account, by
+        self.state, self.url, self.code, self.message = 'waiting', None, None, ''
+        self.started = time.monotonic()
+        self.proc = None
+        self.tmp = None
+
+    def view(self):
+        return {'session': self.id, 'account': self.account_id, 'state': self.state, 'url': self.url, 'code': self.code,
+                'message': self.message}
+
+
+class Logins:
+    def __init__(self, cfg, journal):
+        self.cfg, self.journal = cfg, journal
+        self.lock = threading.Lock()
+        self.by_account = {}
+
+    def current(self, account_id):
+        with self.lock:
+            s = self.by_account.get(account_id)
+            return s if s and s.state == 'waiting' else None
+
+    def start_codex(self, account_id, account, by):
+        """Запустить device-auth; второй запрос, пока идёт первый, получает его окно."""
+        with self.lock:
+            s = self.by_account.get(account_id)
+            if s and s.state == 'waiting':
+                return s
+            s = Login(account_id, account, by)
+            self.by_account[account_id] = s
+        s.tmp = tempfile.mkdtemp(prefix='subs-login-')
+        try:
+            s.proc = subprocess.Popen([self.cfg['codex'], 'login', '--device-auth'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                      stdin=subprocess.DEVNULL, text=True, env={**os.environ, 'CODEX_HOME': s.tmp},
+                                      start_new_session=True)
+        except OSError as e:
+            self.finish(s, 'failed', f'codex не запустился: {e}')
+            return s
+        ready = threading.Event()
+        threading.Thread(target=self._watch_codex, args=(s, ready), daemon=True).start()
+        ready.wait(timeout=20)
+        return s
+
+    def _watch_codex(self, s, ready):
+        deadline = s.started + float(self.cfg.get('login_timeout', 900))
+        killer = threading.Timer(max(0.0, deadline - time.monotonic()), self._expire, args=(s,))
+        killer.daemon = True
+        killer.start()
+        for line in s.proc.stdout:
+            if s.url is None and (m := URL_RE.search(line)):
+                s.url = m.group(0).rstrip('.,)')
+            if s.code is None and (m := CODE_RE.search(line)):
+                s.code = m.group(0)
+            if s.url and s.code:
+                ready.set()
+        s.proc.stdout.close()
+        code = s.proc.wait()
+        killer.cancel()
+        ready.set()
+        if s.state != 'waiting':
+            return
+        auth = Path(s.tmp) / 'auth.json'
+        if code == 0 and auth.exists() and auth.stat().st_size > 0:
+            replace_atomically(codex_home(s.account) / 'auth.json', auth.read_bytes())
+            self.finish(s, 'done', 'вошли')
+        else:
+            self.finish(s, 'failed', f'вход не завершён (код {code})')
+
+    def _expire(self, s):
+        if s.state == 'waiting':
+            self._kill(s)
+            self.finish(s, 'expired', 'вход не завершён за отведённое время')
+
+    def _kill(self, s):
+        if s.proc and s.proc.poll() is None:
+            try:
+                os.killpg(s.proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    def cancel(self, account_id, by):
+        s = self.current(account_id)
+        if s:
+            self._kill(s)
+            self.finish(s, 'cancelled', 'вход отменён')
+        return s
+
+    def finish(self, s, state, message):
+        with self.lock:
+            if s.state != 'waiting':
+                return
+            s.state, s.message = state, message
+        if s.tmp:
+            shutil.rmtree(s.tmp, ignore_errors=True)
+        self.journal(s.by, s.account_id, 'codex device-auth', state)
+
+    def put_secret(self, account_id, account, value, by):
+        """Вставленный токен Claude или новый ключ API: проверить (где можно) и подменить файл."""
+        value = (value or '').strip()
+        if not value or len(value) > 4096 or any(c.isspace() for c in value):
+            self.journal(by, account_id, account['auth'], 'rejected')
+            return {'state': 'failed', 'message': 'пустое или неверное значение'}
+        if account['auth'] == 'api_key' and probe_key(self.cfg, account['provider'], value) is False:
+            self.journal(by, account_id, account['auth'], 'rejected')
+            return {'state': 'failed', 'message': 'ключ отклонён проверкой квоты'}
+        replace_atomically(credential_path(account), (value + '\n').encode())
+        self.journal(by, account_id, account['auth'], 'done')
+        return {'state': 'done', 'message': 'сохранено'}
+
+
+# ── access ──────────────────────────────────────────────────────────────────
+
+def multica_get(cfg, path, headers):
+    req = urllib.request.Request(cfg['multica_url'].rstrip('/') + path, headers=headers)
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode() or 'null')
+
+
+def caller(cfg, request_headers, ws_slug, get=multica_get):
+    """(user, role) по сессии запроса; None — не вошёл или не участник workspace."""
+    headers = {k: v for k, v in request_headers.items() if k.lower() in ('cookie', 'authorization')}
+    if not headers or not ws_slug:
+        return None
+    try:
+        me = get(cfg, '/api/me', headers)
+        workspaces = get(cfg, '/api/workspaces', headers)
+        ws = next((w for w in workspaces or [] if w.get('slug') == ws_slug), None)
+        if not ws:
+            return None
+        members = get(cfg, f"/api/workspaces/{urllib.parse.quote(ws['id'])}/members", headers)
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    member = next((m for m in members or [] if m.get('user_id') == me.get('id')), None)
+    return (me, member.get('role')) if member else None
+
+
+# ── http ────────────────────────────────────────────────────────────────────
+
+def make_handler(cfg, logins, get=multica_get, run=subprocess.run):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):  # no request lines: query strings carry nothing secret, bodies never logged
+            pass
+
+        def send(self, code, body):
+            raw = json.dumps(body, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def who(self, ws):
+            return caller(cfg, dict(self.headers.items()), ws, get)
+
+        def do_GET(self):
+            url = urllib.parse.urlparse(self.path)
+            q = dict(urllib.parse.parse_qsl(url.query))
+            who = self.who(q.get('ws'))
+            if not who:
+                return self.send(401, {'error': 'нужна сессия Multica участника workspace'})
+            accs = accounts(cfg)
+            if url.path == '/api/accounts':
+                out = []
+                for aid, acc in accs.items():
+                    s = logins.current(aid)
+                    out.append({'id': aid, 'provider': acc['provider'], 'auth': acc['auth'], 'state': login_state(cfg, acc, run),
+                                'login': s.view() if s else None})
+                return self.send(200, {'accounts': out, 'can_login': who[1] == 'owner'})
+            if url.path == '/api/login':
+                s = logins.by_account.get(q.get('account', ''))
+                return self.send(200, s.view() if s else {'state': 'none'})
+            return self.send(404, {'error': 'не найдено'})
+
+        def do_POST(self):
+            url = urllib.parse.urlparse(self.path)
+            q = dict(urllib.parse.parse_qsl(url.query))
+            if self.headers.get('X-Subs-Login-Request') != '1':
+                return self.send(403, {'error': 'нужен заголовок X-Subs-Login-Request'})
+            who = self.who(q.get('ws'))
+            if not who:
+                return self.send(401, {'error': 'нужна сессия Multica участника workspace'})
+            if who[1] != 'owner':
+                return self.send(403, {'error': 'входить в подписки может только владелец workspace'})
+            try:
+                body = json.loads(self.rfile.read(min(int(self.headers.get('Content-Length') or 0), 16384)) or b'{}')
+            except ValueError:
+                return self.send(400, {'error': 'неверное тело'})
+            account_id = str(body.get('account', ''))
+            account = accounts(cfg).get(account_id)
+            if not account:
+                return self.send(404, {'error': 'аккаунта нет в таблице подписок'})
+            by = who[0].get('email') or who[0].get('id', '')
+            action = body.get('action')
+            if action == 'start' and account['auth'] == 'codex_auth':
+                return self.send(200, logins.start_codex(account_id, account, by).view())
+            if action == 'cancel':
+                s = logins.cancel(account_id, by)
+                return self.send(200, s.view() if s else {'state': 'none'})
+            if action == 'secret' and account['auth'] in ('claude_oauth', 'api_key'):
+                return self.send(200, logins.put_secret(account_id, account, body.get('value'), by))
+            return self.send(400, {'error': 'действие не подходит к аккаунту'})
+
+    return Handler
+
+
+def journal_writer(cfg):
+    path = Path(cfg['journal'])
+    lock = threading.Lock()
+
+    def write(by, account, action, result):
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with lock, path.open('a') as out:
+            out.write(json.dumps({'at': now(), 'by': by, 'account': account, 'action': action, 'result': result}, ensure_ascii=False) + '\n')
+    return write
+
+
+def main(argv):
+    cfg = load_config()
+    host, port = cfg['listen'].rsplit(':', 1)
+    if host not in ('127.0.0.1', 'localhost', '::1'):
+        print('subs-login слушает только localhost', file=sys.stderr)
+        return 2
+    logins = Logins(cfg, journal_writer(cfg))
+    server = ThreadingHTTPServer((host, int(port)), make_handler(cfg, logins))
+    print(f'subs-login: {cfg["listen"]}', flush=True)
+    server.serve_forever()
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

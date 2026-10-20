@@ -1,0 +1,15 @@
+[Unit]
+Description=Вход в подписки со страницы «Подписки» Multica
+After=network-online.target
+
+[Service]
+User=agents
+ExecStart=/usr/local/bin/subs-login
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
