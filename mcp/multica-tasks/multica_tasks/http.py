@@ -108,6 +108,9 @@ def make_handler(config, service, limiter):
                 return self.reject(401, 'unauthorized', [('WWW-Authenticate', 'Bearer')])
             if self.command != 'POST':
                 return self.reject(405, 'use POST', [('Allow', 'POST')])
+            version = self.headers.get('MCP-Protocol-Version')
+            if version is not None and version not in rpc.PROTOCOLS:
+                return self.reject(400, 'unsupported MCP protocol version')
             self.post_mcp(ip)
 
         def post_mcp(self, ip):

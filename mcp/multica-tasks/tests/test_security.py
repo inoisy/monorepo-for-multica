@@ -91,6 +91,14 @@ class Transport(McpCase):
         self.assertEqual(self.rpc('ping')[1]['result'], {})
         self.assertEqual(self.rpc('resources/list')[1]['error']['code'], -32601)
 
+    def test_неподдерживаемая_версия_не_вызывает_инструмент(self):
+        call = {'name': 'wake_issue', 'arguments': {'workspace': 'stt', 'issue': 'TST-1'}}
+        status, _ = self.rpc('tools/call', call, headers={'MCP-Protocol-Version': '2099-01-01'})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.fake.requests, [])
+        for version in ('2025-03-26', '2025-06-18'):
+            self.assertEqual(self.rpc('ping', headers={'MCP-Protocol-Version': version})[0], 200)
+
     def test_iserror_только_при_ошибке(self):
         good = self.tool('list_workspaces')
         self.assertIs(good['isError'], False)
@@ -262,6 +270,27 @@ class Audit(McpCase):
         self.assertNotIn(PAT, raw)
         self.assertNotIn(KEY, raw)
         self.assertIn('[redacted]', raw)
+
+    def test_аудит_маскирует_секрет_до_обрезки_превью(self):
+        import hashlib
+        from multica_tasks.audit import HEAD_CHARS
+        for secret in (PAT, KEY):
+            with self.subTest(secret_length=len(secret)):
+                text = 'x' * (HEAD_CHARS - 20) + secret
+                self.ok('comment_issue', workspace='stt', issue='TST-1', text=text)
+                preview = self.audit_lines()[-1]['args']['text']
+                self.assertNotIn(secret[:20], preview['head'])
+                self.assertIn('[redacted]', preview['head'])
+                self.assertEqual(preview['sha256'], hashlib.sha256(text.encode()).hexdigest())
+                self.assertEqual(preview['length'], len(text))
+
+    def test_аудит_маскирует_неверные_аргументы_до_обрезки_repr(self):
+        for secret in (PAT, KEY):
+            with self.subTest(secret_length=len(secret)):
+                self.service.call_tool('wake_issue', 'x' * 180 + secret)
+                shown = self.audit_lines()[-1]['args']['arguments']
+                self.assertNotIn(secret[:19], shown)
+                self.assertIn('[redacted]', shown)
 
     def test_ключ_и_pat_не_утекают_в_ответы_и_ошибки(self):
         self.fake.fail[('GET', '/api/agents')] = (500, {'error': f'внутри {PAT}'})

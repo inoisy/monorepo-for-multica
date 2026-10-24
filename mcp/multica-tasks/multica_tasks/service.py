@@ -84,9 +84,9 @@ class Service:
         return is_error, self.api.redact(payload)
 
     def _audit(self, name, ctx, args, payload, is_error):
-        shown = dict(args) if isinstance(args, dict) else {'arguments': repr(args)[:200]}
+        shown = dict(args) if isinstance(args, dict) else {'arguments': repr(self.api.redact(args))[:200]}
         if isinstance(shown.get('text'), str):
-            shown['text'] = text_digest(shown['text'])
+            shown['text'] = text_digest(shown['text'], self.api.redact)
         if is_error:
             result = {'ok': False, **payload['error']}
         else:

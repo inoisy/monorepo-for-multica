@@ -10,8 +10,9 @@ from .redaction import Redactor
 HEAD_CHARS = 200
 
 
-def text_digest(text):
-    return {'sha256': hashlib.sha256(text.encode()).hexdigest(), 'head': text[:HEAD_CHARS], 'length': len(text)}
+def text_digest(text, redact):
+    # Хэш и длина описывают оригинал; секреты маскируем до обрезки превью.
+    return {'sha256': hashlib.sha256(text.encode()).hexdigest(), 'head': redact(text)[:HEAD_CHARS], 'length': len(text)}
 
 
 class AuditLog:
