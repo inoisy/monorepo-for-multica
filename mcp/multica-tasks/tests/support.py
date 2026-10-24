@@ -238,6 +238,7 @@ class McpCase(unittest.TestCase):
     def http(self, method='POST', path='/mcp', body=None, headers=None, raw=None, peer='127.0.0.1'):
         """Настоящий HTTP-обмен с настоящим обработчиком, но по socketpair (AF_UNIX): сеть в песочнице закрыта."""
         server_sock, client_sock = socket.socketpair()
+        client_sock.settimeout(2)
         worker = threading.Thread(target=self.handler, args=(server_sock, (peer, 50000), object()), daemon=True)
         worker.start()
         conn = http.client.HTTPConnection('127.0.0.1', timeout=10)

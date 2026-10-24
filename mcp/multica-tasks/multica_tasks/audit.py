@@ -5,6 +5,8 @@ import os
 import threading
 import time
 
+from .redaction import Redactor
+
 HEAD_CHARS = 200
 
 
@@ -14,7 +16,7 @@ def text_digest(text):
 
 class AuditLog:
     def __init__(self, path, secrets=(), clock=time.time):
-        self.path, self._secrets, self._clock = path, tuple(s for s in secrets if s), clock
+        self.path, self._redact, self._clock = path, Redactor(secrets), clock
         self._lock = threading.Lock()
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         os.close(fd)
@@ -22,9 +24,7 @@ class AuditLog:
 
     def write(self, **fields):
         entry = {'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(self._clock())), **fields}
-        line = json.dumps(entry, ensure_ascii=False, sort_keys=True)
-        for secret in self._secrets:
-            line = line.replace(secret, '[redacted]')
+        line = json.dumps(self._redact(entry), ensure_ascii=False, sort_keys=True)
         with self._lock:
             fd = os.open(self.path, os.O_WRONLY | os.O_APPEND)
             try:

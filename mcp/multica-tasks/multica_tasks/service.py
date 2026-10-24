@@ -63,7 +63,7 @@ class Service:
         ctx = CallContext(client_ip=client_ip)
         spec = tools.TOOLS.get(name)
         if spec is None:
-            return True, ToolError('unknown_tool', f'нет инструмента {name}').to_dict()
+            return True, self.api.redact(ToolError('unknown_tool', f'нет инструмента {name}').to_dict())
         args = arguments
         try:
             args = tools.validate(name, arguments)
@@ -80,7 +80,8 @@ class Service:
             payload, is_error = ToolError('internal', 'внутренняя ошибка сервера').to_dict(), True
         if spec['write']:
             self._audit(name, ctx, args, payload, is_error)
-        return is_error, payload
+        # Ошибки аргументов тоже могут содержать введённый клиентом секрет.
+        return is_error, self.api.redact(payload)
 
     def _audit(self, name, ctx, args, payload, is_error):
         shown = dict(args) if isinstance(args, dict) else {'arguments': repr(args)[:200]}

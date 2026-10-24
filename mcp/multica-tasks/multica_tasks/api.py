@@ -6,6 +6,7 @@ import urllib.parse
 import urllib.request
 
 from .errors import ApiError, ForbiddenCall
+from .redaction import Redactor
 
 UUID = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
 # Ключ задачи в пути принимает и UUID, и «TST-272»: сервер разбирает оба.
@@ -45,13 +46,8 @@ class Api:
     def __init__(self, base_url, pat, timeout=20.0, secrets=(), opener=None):
         self.base_url, self.timeout = base_url.rstrip('/'), timeout
         self._pat = pat
-        self._secrets = tuple(s for s in (pat, *secrets) if s)
+        self.redact = Redactor((pat, *secrets))
         self._opener = opener or urllib.request.build_opener(_NoRedirect)
-
-    def _scrub(self, text):
-        for secret in self._secrets:
-            text = text.replace(secret, '[redacted]')
-        return text
 
     def request(self, method, path, workspace_id=None, query=None, body=None):
         if not is_allowed(method, path):
@@ -73,13 +69,14 @@ class Api:
         except urllib.error.HTTPError as e:
             raise ApiError(e.code, self._error_text(e.read(4096))) from None
         except (urllib.error.URLError, OSError) as e:
-            raise ApiError(0, self._scrub(f'Multica API недоступен: {getattr(e, "reason", e)}')) from None
+            raise ApiError(0, self.redact(f'Multica API недоступен: {getattr(e, "reason", e)}')) from None
         if len(raw) > MAX_RESPONSE:
             raise ApiError(0, 'ответ Multica API слишком большой')
         if not raw.strip():
             return {}
         try:
-            return json.loads(raw)
+            # До проекций: иначе обрезка поля может оставить видимую часть секрета.
+            return self.redact(json.loads(raw))
         except ValueError:
             raise ApiError(0, 'Multica API вернул не JSON') from None
 
@@ -91,7 +88,7 @@ class Api:
                 text = str(parsed.get('error') or parsed.get('message') or text)
         except ValueError:
             pass
-        return self._scrub(text.strip())[:MAX_ERROR_TEXT]
+        return self.redact(text.strip())[:MAX_ERROR_TEXT]
 
     def get(self, path, ws=None, **query):
         return self.request('GET', path, ws, query)

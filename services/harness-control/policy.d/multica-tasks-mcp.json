@@ -52,6 +52,11 @@
       "mode": "0644"
     },
     {
+      "src": "multica_tasks/redaction.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/redaction.py",
+      "mode": "0644"
+    },
+    {
       "src": "multica_tasks/rpc.py",
       "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/rpc.py",
       "mode": "0644"
@@ -83,6 +88,7 @@
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/errors.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/http.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/projection.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/redaction.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/rpc.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/service.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/tools.py"

@@ -103,6 +103,50 @@ class Transport(McpCase):
         self.fake.tasks[-1]['error'] = 'упал'
         self.assertIs(self.tool('get_issue', workspace='stt', issue='TST-70')['isError'], False)
 
+    def test_секреты_в_ошибках_рана_маскируются_до_обрезки(self):
+        from multica_tasks.projection import ERROR_LIMIT
+        iid = self.fake.find_issue('TST-1')['id']
+        self.fake.add_task(iid, AGENT_A, 'failed')
+        for text in (f'сбой: {PAT}, {KEY}', 'x' * (ERROR_LIMIT - 20) + PAT + KEY,
+                     'x' * (ERROR_LIMIT - 20) + KEY + PAT):
+            self.fake.tasks[-1]['error'] = text
+            for name, args, field in (('get_issue', {'issue': 'TST-1'}, 'runs'),
+                                      ('list_agent_tasks', {'agent': AGENT_A}, 'tasks')):
+                with self.subTest(name=name, text_length=len(text)):
+                    result = self.tool(name, workspace='stt', **args)
+                    self.assertIs(result['isError'], False)
+                    error = json.loads(result['content'][0]['text'])[field][0]['error']
+                    self.assertIn('[redacted]', error)
+                    self.assertNotIn(PAT[:20], error)
+                    self.assertNotIn(KEY[:20], error)
+                    self.assertLessEqual(len(error), ERROR_LIMIT + 1)
+
+    def test_секреты_маскируются_в_тексте_ответов_и_ошибках_аргументов(self):
+        issue = self.fake.find_issue('TST-1')
+        issue['description'] = f'Описание {KEY} {PAT}'
+        self.fake.comments[issue['id']] = [{'content': f'Комментарий {KEY} {PAT}'}]
+        for name, args, is_error in (('get_issue', {'workspace': 'stt', 'issue': 'TST-1'}, False),
+                                     ('list_agents', {'workspace': f'{KEY} {PAT}'}, True),
+                                     (f'unknown_{KEY}_{PAT}', {}, True)):
+            with self.subTest(name=name):
+                result = self.tool(name, **args)
+                self.assertIs(result['isError'], is_error)
+                payload = json.loads(result['content'][0]['text'])
+                text = json.dumps(payload, ensure_ascii=False)
+                self.assertIn('[redacted]', text)
+                self.assertNotIn(KEY, text)
+                self.assertNotIn(PAT, text)
+
+    def test_неверное_имя_инструмента_даёт_json_rpc_ошибку(self):
+        for name in ([], {}, None, True, 42, ''):
+            with self.subTest(name=name):
+                status, body = self.rpc('tools/call', {'name': name, 'arguments': {}})
+                self.assertEqual(status, 200)
+                self.assertEqual(body['id'], 1)
+                self.assertEqual(body['error']['code'], -32602)
+                self.assertEqual(self.rpc('ping')[1]['result'], {})
+        self.assertEqual(self.fake.requests, [])
+
     def test_ip_клиента_из_forwarded_только_с_loopback(self):
         call = {'name': 'wake_issue', 'arguments': {'workspace': 'stt', 'issue': 'TST-1'}}
         # от Caddy (loopback): адрес клиента — последний элемент заголовка

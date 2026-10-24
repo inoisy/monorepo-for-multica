@@ -34,7 +34,10 @@ def handle(message, service, client_ip=''):
     if method == 'tools/list':
         return _result(msg_id, {'tools': tools.public_list()})
     if method == 'tools/call':
-        is_error, payload = service.call_tool(params.get('name'), params.get('arguments'), client_ip)
+        name = params.get('name')
+        if not isinstance(name, str) or not name:
+            return _error(msg_id, -32602, 'name: нужна непустая строка')
+        is_error, payload = service.call_tool(name, params.get('arguments'), client_ip)
         # isError — по признаку ошибки из сервиса, а не по наличию ключа в теле
         return _result(msg_id, {'content': [{'type': 'text', 'text': json.dumps(payload, ensure_ascii=False)}],
                                 'isError': bool(is_error)})
