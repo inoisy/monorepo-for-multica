@@ -46,6 +46,10 @@ tooling version pinned at the monorepo root. Each project ships its own.
   over curated themes and layouts (incl. bento grids), with browser render
   checks, screenshot previews, and PDF/PPTX/PNG export. Node.js, TypeScript,
   pnpm. See `mcp/slides/README.md`.
+- `mcp/multica-tasks/` — remote MCP server (streamable HTTP) for Claude connectors:
+  Multica issues and runs from any device — list stale issues, comment, change
+  status/assignee, wake exactly one run, cancel. Python stdlib; deployed via
+  harness-control component `multica-tasks-mcp`. See `mcp/multica-tasks/README.md`.
 
 ### `skills/` — agent skills
 

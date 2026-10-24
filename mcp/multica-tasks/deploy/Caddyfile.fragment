@@ -1,0 +1,19 @@
+# Вставить в блок `multica.yakutov.com { … }` в /etc/caddy/Caddyfile — до последней строки `reverse_proxy 127.0.0.1:3000`,
+# рядом с /control и /feedback. Подробности и проверка — ROOT-STEPS.md.
+#
+# Пускаем только исходящие адреса облака Anthropic (https://platform.claude.com/docs/en/api/ip-addresses) — оттуда ходят
+# claude.ai, телефон и Desktop. Для Claude Code с ноутбука задайте MULTICA_MCP_EXTRA_IPS (через пробел) в окружении Caddy;
+# по умолчанию переменная пуста.
+	@mcp path /mcp
+	handle @mcp {
+		@outside not remote_ip 160.79.104.0/21 {$MULTICA_MCP_EXTRA_IPS:}
+		respond @outside 403
+
+		request_body {
+			max_size 1MB
+		}
+		# Адрес клиента для аудита: заголовок задаёт Caddy, присланное клиентом не принимаем
+		reverse_proxy 127.0.0.1:8101 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}

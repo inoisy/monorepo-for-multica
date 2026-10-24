@@ -1,0 +1,146 @@
+{
+  "component": "multica-tasks-mcp",
+  "description": "MCP-сервер задач и ранов Multica для Claude (claude.ai): удалённый streamable HTTP за Caddy, только задачи и раны",
+  "source": {
+    "repo": "https://github.com/inoisy/monorepo-for-multica.git",
+    "path": "mcp/multica-tasks"
+  },
+  "targets": [
+    {
+      "src": "bin/multica-tasks-mcp",
+      "dst": "/usr/local/lib/multica-tasks-mcp/bin/multica-tasks-mcp",
+      "mode": "0755"
+    },
+    {
+      "src": "multica_tasks/__init__.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/__init__.py",
+      "mode": "0644"
+    },
+    {
+      "src": "multica_tasks/api.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/api.py",
+      "mode": "0644"
+    },
+    {
+      "src": "multica_tasks/audit.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/audit.py",
+      "mode": "0644"
+    },
+    {
+      "src": "multica_tasks/cli.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/cli.py",
+      "mode": "0644"
+    },
+    {
+      "src": "multica_tasks/config.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/config.py",
+      "mode": "0644"
+    },
+    {
+      "src": "multica_tasks/errors.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/errors.py",
+      "mode": "0644"
+    },
+    {
+      "src": "multica_tasks/http.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/http.py",
+      "mode": "0644"
+    },
+    {
+      "src": "multica_tasks/projection.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/projection.py",
+      "mode": "0644"
+    },
+    {
+      "src": "multica_tasks/redaction.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/redaction.py",
+      "mode": "0644"
+    },
+    {
+      "src": "multica_tasks/rpc.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/rpc.py",
+      "mode": "0644"
+    },
+    {
+      "src": "multica_tasks/service.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/service.py",
+      "mode": "0644"
+    },
+    {
+      "src": "multica_tasks/tools.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/tools.py",
+      "mode": "0644"
+    }
+  ],
+  "required_units": [
+    "multica-tasks-mcp.service"
+  ],
+  "restart_units": [
+    {
+      "unit": "multica-tasks-mcp.service",
+      "when_changed": [
+        "/usr/local/lib/multica-tasks-mcp/bin/multica-tasks-mcp",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/__init__.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/api.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/audit.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/cli.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/config.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/errors.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/http.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/projection.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/redaction.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/rpc.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/service.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/tools.py"
+      ]
+    }
+  ],
+  "baseline_capabilities": {
+    "lanes": []
+  },
+  "validate": {
+    "checks": [
+      {
+        "name": "mcp-smoke",
+        "argv": [
+          "/usr/bin/python3",
+          "-I",
+          "{checks}/mcp_smoke.py",
+          "{work}"
+        ]
+      }
+    ],
+    "tests": {
+      "argv": [
+        "/usr/bin/python3",
+        "-I",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-q"
+      ],
+      "count_regex": "Ran (\\d+) tests?",
+      "min": 60
+    }
+  },
+  "sandbox": {
+    "memory_max": "512M",
+    "tasks_max": 64,
+    "runtime_max_sec": 300,
+    "path": "/usr/local/bin:/usr/bin:/bin"
+  },
+  "health": {
+    "timeout": 60,
+    "poll": 2,
+    "http": [
+      {
+        "url": "http://127.0.0.1:8101/healthz",
+        "expect": [
+          200
+        ]
+      }
+    ]
+  }
+}

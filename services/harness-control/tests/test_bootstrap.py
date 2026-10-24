@@ -68,7 +68,7 @@ class Scripts(unittest.TestCase):
         self.assertIn('for stale in multica-conveyor control-state', text)
         self.assertIn('COMPONENTS=(harness-canary)', text)
         self.assertNotIn('multica-provider', text)
-        self.assertEqual(sorted(p.stem for p in (PKG / 'policy.d').glob('*.json')), ['harness-canary'])
+        self.assertEqual(sorted(p.stem for p in (PKG / 'policy.d').glob('*.json')), ['harness-canary', 'multica-tasks-mcp'])
         self.assertFalse((PKG / 'checks' / 'control-state').exists())
 
     def test_таймер_canary_ставится_выключенным(self):
