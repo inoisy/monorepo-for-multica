@@ -34,7 +34,8 @@ install -d -o root -g root -m 0755 /usr/local/lib/bio-media-deploy /var/lib/bio-
 install -o root -g root -m 0755 "$REPO/services/bio-media-deploy/install.sh" /usr/local/lib/bio-media-deploy/install.sh
 # Сохранить уже установленную доверенную проверку до снятия старого пакета.
 install -o root -g root -m 0644 /usr/local/lib/harness-control/checks/bio-media-api/broker_guard.py /usr/local/lib/bio-media-deploy/broker_guard.py
-git -C /home/agents/bio-course show "$BIO_SHA:bio-media-api" > /var/lib/bio-media-deploy/candidate
+# git — от agents: root не исполняет git в рабочей копии агентов (safe.directory, их .git/config).
+runuser -u agents -- git -C /home/agents/bio-course show "$BIO_SHA:bio-media-api" > /var/lib/bio-media-deploy/candidate
 chown root:root /var/lib/bio-media-deploy/candidate
 chmod 0644 /var/lib/bio-media-deploy/candidate
 printf '%s\n' "$BIO_SHA" > /var/lib/bio-media-deploy/source-sha
