@@ -1,8 +1,9 @@
-# Add to the existing Multica compose project only after the autodeploy gate
-# in services/harness-retire/README.md has passed. Stand uses ../compose.yaml.
+# Installed by the operator as /opt/multica/docker-compose.mcp.yml (see
+# services/harness-retire/README.md); multica-autodeploy includes it and sets the
+# image from deploy/autodeploy/mcp-image of the released commit. Stand uses ../compose.yaml.
 services:
   multica-tasks-mcp:
-    image: ${MULTICA_TASKS_MCP_IMAGE:?pin an immutable image first}
+    image: ${MULTICA_TASKS_MCP_IMAGE:-multica-tasks-mcp:set-by-autodeploy}
     user: ${MULTICA_MCP_UID:?existing multica-mcp uid}:${MULTICA_MCP_GID:?existing multica-mcp gid}
     network_mode: host
     env_file: /etc/multica-tasks-mcp/env

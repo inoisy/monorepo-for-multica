@@ -88,10 +88,11 @@ Multica API подменяется фейком в процессе (`tests/supp
 Подготовка перехода на compose (STT-454): `Dockerfile`, `compose.yaml` для
 изолированного стенда, `deploy/compose.production.yaml` для действующего проекта.
 Переключение и откат — `services/harness-retire/README.md` от корня репозитория.
-Общая автовыкатка MCP пока заблокирована границей постановки; до её реализации
-действующую службу и прежний механизм не снимать.
+После переключения MCP обновляется и откатывается вместе с платформой через
+`multica-autodeploy`: версия образа закреплена файлом `deploy/autodeploy/mcp-image`
+в форке. До проверки замены действующую службу и прежний механизм не снимать.
 
-Первая установка — разово от root по `ROOT-STEPS.md`. Дальше обновления идут через harness-control, компонент
+До переключения действует прежняя установка по `ROOT-STEPS.md` и обновления через harness-control, компонент
 `multica-tasks-mcp`: `validate` на коммит из `main`, `deploy`, health `GET http://127.0.0.1:8101/healthz`, при провале
 автооткат. Политика: `services/harness-control/policy.d/multica-tasks-mcp.json`, доверенная проверка:
 `services/harness-control/checks/multica-tasks-mcp/`.
