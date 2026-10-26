@@ -1,0 +1,7 @@
+*
+!bin/
+!bin/multica-tasks-mcp
+!multica_tasks/
+!multica_tasks/*.py
+!deploy/
+!deploy/probe.py

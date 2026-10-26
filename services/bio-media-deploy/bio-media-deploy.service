@@ -1,0 +1,11 @@
+[Unit]
+Description=Install the operator-approved bio media broker snapshot
+After=bio-git-sync.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/bio-media-deploy/install.sh
+TimeoutStartSec=120
+UMask=0077
+PrivateTmp=yes
+NoNewPrivileges=yes

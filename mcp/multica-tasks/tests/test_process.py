@@ -95,6 +95,10 @@ class Process(McpCase):
                      {'Authorization': f'Bearer {KEY}', 'Host': '127.0.0.1'})
         self.assertEqual(len(json.loads(conn.getresponse().read())['result']['tools']), 9)
         conn.close()
+        probe = subprocess.run([sys.executable, '-I', str(PKG / 'deploy' / 'probe.py'), '--smoke'],
+                               env=self.env(), capture_output=True, text=True, timeout=15)
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertIn('healthz=200; unauthenticated=401; tools=9; bad-origin=403', probe.stdout)
         proc.send_signal(signal.SIGTERM)
         self.assertEqual(proc.wait(timeout=10), 0)
         logs = proc.stderr.read()

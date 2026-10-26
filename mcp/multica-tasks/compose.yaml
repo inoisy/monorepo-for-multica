@@ -1,0 +1,17 @@
+# Isolated acceptance stand: no production token or API, no paid/external calls.
+services:
+  multica-tasks-mcp:
+    build: .
+    environment:
+      MULTICA_MCP_KEY: stand-only-key-00000000000000000000000000000000
+      MULTICA_PAT: stand-only-no-platform-access
+      MULTICA_API_URL: http://127.0.0.1:9
+      MULTICA_MCP_WORKSPACES: stand
+      MULTICA_MCP_HOST: 0.0.0.0
+      MULTICA_MCP_ALLOWED_HOSTS: localhost,127.0.0.1,${STAND_NAME:-local}.stand.yakutov.com
+      STATE_DIRECTORY: /state
+    expose: ["8101"]
+    volumes:
+      - audit:/state
+volumes:
+  audit: {}

@@ -1,0 +1,22 @@
+# Add to the existing Multica compose project only after the autodeploy gate
+# in services/harness-retire/README.md has passed. Stand uses ../compose.yaml.
+services:
+  multica-tasks-mcp:
+    image: ${MULTICA_TASKS_MCP_IMAGE:?pin an immutable image first}
+    user: ${MULTICA_MCP_UID:?existing multica-mcp uid}:${MULTICA_MCP_GID:?existing multica-mcp gid}
+    network_mode: host
+    env_file: /etc/multica-tasks-mcp/env
+    environment:
+      MULTICA_MCP_HOST: 127.0.0.1
+      MULTICA_MCP_PORT: "8101"
+      STATE_DIRECTORY: /state
+    volumes:
+      - /var/lib/multica-tasks-mcp:/state
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:rw,noexec,nosuid,size=16m]
+    mem_limit: 256m
+    pids_limit: 64
+    restart: unless-stopped
+    stop_grace_period: 15s
