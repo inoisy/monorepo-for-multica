@@ -1,0 +1,16 @@
+{
+  "issue": "STT-454",
+  "branch": "t-12345-retire-harness",
+  "companions": [
+    {
+      "repo": "git@github.com:inoisy/multica.git",
+      "commit": "76e68692e4da72bad0d3c4036d367210c888371c",
+      "pr": "https://github.com/inoisy/multica/pull/83"
+    },
+    {
+      "repo": "git@github.com:inoisy/stt-agents.git",
+      "commit": "6a75ffd9a5556a48cda5ea8990435a9b417e974d",
+      "pr": "https://github.com/inoisy/stt-agents/pull/102"
+    }
+  ]
+}

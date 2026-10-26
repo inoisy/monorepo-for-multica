@@ -1,0 +1,24 @@
+# Installed by the operator as /opt/multica/docker-compose.mcp.yml (see
+# services/harness-retire/README.md); multica-autodeploy includes it and sets the
+# image from deploy/autodeploy/mcp-image of the released commit. Stand uses ../compose.yaml.
+services:
+  multica-tasks-mcp:
+    image: ${MULTICA_TASKS_MCP_IMAGE:-multica-tasks-mcp:set-by-autodeploy}
+    user: ${MULTICA_MCP_UID:?existing multica-mcp uid}:${MULTICA_MCP_GID:?existing multica-mcp gid}
+    network_mode: host
+    env_file: /etc/multica-tasks-mcp/env
+    environment:
+      MULTICA_MCP_HOST: 127.0.0.1
+      MULTICA_MCP_PORT: "8101"
+      STATE_DIRECTORY: /state
+    volumes:
+      - /var/lib/multica-tasks-mcp:/state
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    mem_limit: 256m
+    pids_limit: 64
+    restart: unless-stopped
+    stop_grace_period: 15s
