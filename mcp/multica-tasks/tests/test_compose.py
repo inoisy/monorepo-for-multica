@@ -32,6 +32,8 @@ class ProductionComposeTest(unittest.TestCase):
         self.assertRegex(dockerfile, r'(?m)^ARG MULTICA_BACKEND_IMAGE=ghcr\.io/inoisy/multica-backend:[0-9a-f]{40}$')
         self.assertIn('COPY --from=multica-cli /app/multica /usr/local/bin/multica', dockerfile)
         self.assertIsNone(re.search(r'(?m)^FROM .*:latest', dockerfile))
+        # Каталог запусков задаёт compose вместе с tmpfs: со старым compose без tmpfs cwd создаётся в /tmp
+        self.assertNotIn('MULTICA_MCP_RUN_DIR', dockerfile)
 
     def test_every_tmpfs_entry_starts_with_absolute_path(self):
         for entry in self.service()['tmpfs']:

@@ -87,6 +87,8 @@ class Runner:
             self._kill(proc)
         out.join(2)
         err.join(2)
+        proc.stdout.close()
+        proc.stderr.close()
         stdout, cut_out = self._shape(out)
         stderr, cut_err = self._shape(err)
         return RunResult(exit_code=None if timeout else proc.returncode, stdout=stdout, stderr=stderr,

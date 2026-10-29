@@ -92,6 +92,14 @@ class Allowlist(unittest.TestCase):
         self.assertFalse(policy.wants_output_flag(['issue', 'list', '--output=table']))
         self.assertFalse(policy.wants_output_flag(['issue', 'create', '-h']))
 
+    def test_help_как_значение_флага_не_справка(self):
+        # `--title --help`: pflag берёт --help значением, команда выполняется — воркспейс обязателен
+        self.assertFalse(policy.is_help(['issue', 'create', '--title', '--help']))
+        self.assertTrue(policy.needs_workspace(('issue',), ['issue', 'create', '--title', '--help']))
+        self.assertTrue(policy.wants_output_flag(['issue', 'create', '--title', '--help']))
+        self.assertTrue(policy.is_help(['issue', 'get', 'TST-1', '--help']))
+        self.assertFalse(policy.needs_workspace(('issue',), ['issue', 'create', '-h']))
+
 
 if __name__ == '__main__':
     unittest.main()

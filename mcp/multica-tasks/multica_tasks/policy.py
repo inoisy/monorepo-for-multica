@@ -83,12 +83,17 @@ def check(argv):
     return prefix
 
 
+def is_help(argv):
+    """Справка, только если перед --help нет флагов: в `--title --help` флаг съедает его как значение и команда выполняется."""
+    return argv[-1] in HELP_FLAGS and not any(t.startswith('-') for t in argv[:-1])
+
+
 def wants_output_flag(argv):
     """Добавлять ли `--output json`: справке и version он не нужен, явный --output не трогаем."""
-    if any(t in HELP_FLAGS for t in argv) or argv[0] == 'version':
+    if is_help(argv) or argv[0] == 'version':
         return False
     return not any(t == '--output' or t.startswith('--output=') for t in argv)
 
 
 def needs_workspace(prefix, argv):
-    return prefix not in NO_WORKSPACE_PREFIXES and not any(t in HELP_FLAGS for t in argv)
+    return prefix not in NO_WORKSPACE_PREFIXES and not is_help(argv)

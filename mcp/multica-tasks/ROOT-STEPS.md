@@ -96,11 +96,18 @@ harness-control inspect multica-tasks-mcp   # дрейфа нет, health ok
 Файл клиентов читает сам сервис: владелец — UID/GID контейнера (`MULTICA_MCP_UID:MULTICA_MCP_GID`), права `0600`,
 иначе сервис не стартует. Если юнит старый (systemd) — владелец `multica-mcp`.
 
+Контейнер (`multica-autodeploy`): этот шаг — до закрепления нового образа в `deploy/autodeploy/mcp-image` форка. Порядок:
+1) создать `clients.json` (скрипт ниже) — иначе Docker при старте создаст на месте файла каталог; 2) обновить root-копию
+`/opt/multica/docker-compose.mcp.yml` по `deploy/compose.production.yaml` этого коммита, сохранив строку `user:` из
+действующей копии (tmpfs `/run/multica-cli`, `MULTICA_MCP_RUN_DIR`, монтирование `clients.json`); 3) добавить строку
+`MULTICA_MCP_CLIENTS` в env. Без шагов 2–3 новый образ работает только с клиентом по умолчанию.
+
 ```sh
 umask 077
 read -rsp 'PAT сотрудника (mul_…): ' EMP_PAT; echo
 EMP_KEY=$(openssl rand -hex 32)
 FILE=/etc/multica-tasks-mcp/clients.json
+[ -d "$FILE" ] && rmdir "$FILE"   # каталог, который создал Docker при старте без файла
 [ -f "$FILE" ] || echo '[]' > "$FILE"
 cp -a "$FILE" "$FILE.bak-$(date +%Y%m%d%H%M%S)"
 NAME='Илья' KEY="$EMP_KEY" PAT="$EMP_PAT" WS='stt' FILE="$FILE" python3 -I - <<'PY'
@@ -113,8 +120,10 @@ chown "$(stat -c '%u:%g' /var/lib/multica-tasks-mcp)" "$FILE"; chmod 0600 "$FILE
 echo "Ключ для сотрудника (повторно не показывается): $EMP_KEY"; unset EMP_KEY EMP_PAT
 ```
 
-В `/etc/multica-tasks-mcp/env` должна быть строка `MULTICA_MCP_CLIENTS=/etc/multica-tasks-mcp/clients.json`. Затем перезапустить
-сервис (контейнер: `docker compose … up -d multica-tasks-mcp`; systemd: `systemctl restart multica-tasks-mcp`).
+В `/etc/multica-tasks-mcp/env` должна быть строка `MULTICA_MCP_CLIENTS=/etc/multica-tasks-mcp/clients.json`. Файл читается
+на старте, поэтому перезапустить сервис: контейнер — `compose_mcp up -d --force-recreate --no-deps multica-tasks-mcp`
+(`compose_mcp` — из `services/harness-retire/README.md`; обычный `up -d` при изменении одного `clients.json` контейнер не
+пересоздаёт), systemd — `systemctl restart multica-tasks-mcp`.
 
 Проверка: из Claude Code сотрудника `{"args": ["issue", "get", "TST-123"]}`; запрещённая команда `{"args": ["agent", "update", "x"]}`
 даёт отказ «только по ssh»; в `/var/lib/multica-tasks-mcp/audit.jsonl` появляются записи с `"client": "Илья"`, среди них один
@@ -124,7 +133,8 @@ echo "Ключ для сотрудника (повторно не показыв
 grep '"client": "Илья"' /var/lib/multica-tasks-mcp/audit.jsonl | tail -3
 ```
 
-Откат: вернуть `clients.json.bak-*` и перезапустить сервис; клиент по умолчанию работает без файла.
+Откат: `cp clients.json.bak-* clients.json` (копией, не `mv`: файл смонтирован в контейнер) и перезапустить сервис той же
+командой; клиент по умолчанию работает и с пустым `[]`.
 
 ## Шаг 9. Подключить коннектор
 

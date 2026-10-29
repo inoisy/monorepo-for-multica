@@ -7,8 +7,7 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    STATE_DIRECTORY=/state \
-    MULTICA_MCP_RUN_DIR=/run/multica-cli
+    STATE_DIRECTORY=/state
 
 RUN groupadd --gid 10001 mcp \
     && useradd --uid 10001 --gid mcp --no-create-home --shell /usr/sbin/nologin mcp \
