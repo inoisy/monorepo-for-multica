@@ -31,32 +31,33 @@ Python 3.12, только stdlib. Установка и подключение: 
 
 ### Allowlist
 
-Единственная таблица — `ALLOW` в `multica_tasks/policy.py`; тест проверяет каждую строку и каждую запрещённую группу.
-Остальное — JSON-RPC `-32602` с текстом «только по ssh», процесс не запускается, отказ идёт в аудит.
+Единственная таблица — `COMMANDS` в `multica_tasks/policy.py`: явный перечень путей команд с отметкой «чтение» или
+«запись»; тест проверяет каждую строку. Всё, чего нет в таблице, — JSON-RPC `-32602` с текстом «только по ssh», процесс не
+запускается, отказ идёт в аудит. Новая подкоманда CLI через MCP недоступна, пока её не внесут в таблицу. Путь команды —
+слова до первого флага: `issue --output json comment delete` не совпадает ни с одной строкой.
 
-| Префикс argv | Примечание |
+| Команды | Доступ |
 |---|---|
-| `issue *` | все подкоманды (create, update, comment, assign, steer, wakeup, runs, …); у `issue` нет `delete` |
-| `project list\|get` | чтение |
-| `agent list\|get\|models\|tasks` | `agent models` только чтение: `set`, `profile`, `personal`, `single`, `tools`, `reset` запрещены |
-| `squad list`, `squad member list` | чтение |
-| `profile list`, `workflow list`, `label list`, `property list` | чтение |
-| `skill list\|get` | `skill get --with-content` запрещён |
-| `runtime unavailable` | `recheck` запрещён |
-| `subscription list`, `workspace list`, `version` | чтение |
+| `issue list\|get\|search\|children\|pull-requests\|timeline\|runs\|run-messages\|usage`, `issue comment\|subscriber\|label\|property list`, `issue metadata list\|get`, `issue wakeup list\|get\|runs\|events` | чтение |
+| `issue create\|update\|assign\|status\|reorder\|rerun-task\|cancel-task\|steer\|model-profile\|stages`, `issue comment add\|update\|resolve\|unresolve`, `issue subscriber\|label add\|remove`, `issue metadata set`, `issue property set\|unset`, `issue wakeup create\|update\|disable\|trigger\|checkin` | запись |
+| `project list\|get`, `agent list\|get\|models\|tasks`, `squad list\|get`, `squad member list`, `profile list`, `workflow list`, `label list`, `property list`, `skill list\|get`, `runtime unavailable`, `subscription list`, `workspace list`, `version` | чтение; у `agent models` запрещены `set`, `profile`, `personal`, `single`, `tools`, `reset`; `skill get --with-content` и `runtime unavailable recheck` запрещены |
 | `--help`, `-h` | на любой разрешённой команде и группе |
+
+Удаления нет совсем: `issue comment delete`, `issue metadata delete`, `issue wakeup delete` и любые `delete` других групп
+запрещены. Ключу с `read_only` доступны только строки «чтение» и справка.
 
 Запрещены везде: флаги `*-file` (`--content-file`, `--description-file`, `--instruction-file`, `--allow-external-file`) и
 `--attach*` — они читают файлы сервера; глобальные `--server-url`, `--profile`, `--workspace-id`, `--debug` — увели бы токен
-на чужой адрес. Запрещены группы `agent` (create/update/delete, mcp, skills), `skill` на запись, `autopilot`, `pool`,
-`subscription` кроме `list`, `runtime` кроме `unavailable`, `daemon`, `auth`, `login`, `setup`, `config`, `update`, `user`,
-`attachment`, `repo`, `property`/`label` на запись, `workspace` кроме `list`.
+на чужой адрес. Запрещены группы `agent` на запись (create/update/archive, env, mcp, skills), `skill` на запись, `autopilot`,
+`pool`, `subscription` кроме `list`, `runtime` кроме `unavailable`, `daemon`, `auth`, `login`, `setup`, `config`, `update`,
+`user`, `attachment`, `repo`, `project`/`property`/`label`/`profile`/`workflow` на запись, `workspace` кроме `list`.
 
 ## Клиенты и ключи
 
 - **Клиент по умолчанию** «Claude (MCP)»: `MULTICA_MCP_KEY` + `MULTICA_PAT` (claude.ai Евгения), воркспейсы из `MULTICA_MCP_WORKSPACES`.
 - **Личные ключи**: файл `MULTICA_MCP_CLIENTS` (путь из env, JSON, права 0600, владелец — пользователь сервиса):
-  `[{"name": "Илья", "key": "…", "token": "mul_…", "workspaces": ["stt"]}]`. Ключ входа → собственный PAT человека, действия
+  `[{"name": "Илья", "key": "…", "token": "mul_…", "workspaces": ["stt"], "read_only": false}]`. `read_only: true` — ключ
+  только для чтения (для клиента по умолчанию — `MULTICA_MCP_READ_ONLY=true`). Ключ входа → собственный PAT человека, действия
   в Multica идут от него. Имена и ключи уникальны, ключ от 32 символов. Сервис не стартует, если файл доступен группе или
   всем. Файл читается на старте: после правки сервис перезапускают.
 - Ключ ищется среди всех клиентов без раннего выхода (`hmac.compare_digest`). Перебор: 10 неверных попыток за минуту с адреса

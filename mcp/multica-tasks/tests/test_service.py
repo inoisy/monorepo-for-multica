@@ -25,7 +25,8 @@ class Clients(McpCase):
     def test_окружение_процесса_минимально_и_cwd_пустой(self):
         self.ok(['issue', 'get', 'TST-1'], stdin='текст')
         call = next(c for c in self.cli.calls if c['argv'][:2] == ['issue', 'get'])
-        self.assertEqual(set(call['env']) - {'LC_CTYPE', 'LANG', 'LC_ALL'},
+        # LC_* и __CF_USER_TEXT_ENCODING добавляет сама ОС (macOS), это не часть контракта
+        self.assertEqual(set(call['env']) - {'LC_CTYPE', 'LANG', 'LC_ALL', '__CF_USER_TEXT_ENCODING'},
                          {'MULTICA_TOKEN', 'MULTICA_SERVER_URL', 'MULTICA_WORKSPACE_ID', 'HOME', 'PATH'})
         self.assertEqual(call['env']['MULTICA_SERVER_URL'], 'http://127.0.0.1:8080')
         self.assertEqual(call['env']['MULTICA_WORKSPACE_ID'], WS)
@@ -54,6 +55,15 @@ class Clients(McpCase):
         self.service.call_tool('multica', {'args': ['issue', 'list']}, '', client)
         self.assertEqual([c['argv'][:2] for c in self.cli.calls], [['issue', 'list']])
         self.assertEqual(self.cli.calls[0]['env']['MULTICA_WORKSPACE_ID'], WS)
+
+    def test_ключ_только_для_чтения_читает_но_не_пишет(self):
+        from multica_tasks.config import Client
+        reader = Client('Читатель', 'r' * 40, 'mul_reader', (WS,), read_only=True)
+        self.service.call_tool('multica', {'args': ['issue', 'list']}, '', reader)
+        with self.assertRaises(InvalidParams):
+            self.service.call_tool('multica', {'args': ['issue', 'comment', 'add', 'TST-1', '--content', 'x']}, '', reader)
+        self.assertEqual([c['argv'][:2] for c in self.cli.calls], [['issue', 'list']])
+        self.assertIn('только для чтения', self.audit_lines()[-1]['denied'])
 
     def test_список_воркспейсов_берётся_один_раз_на_клиента(self):
         self.ok(['issue', 'list'])

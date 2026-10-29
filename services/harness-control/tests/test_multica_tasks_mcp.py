@@ -101,21 +101,30 @@ class SmokeCheck(unittest.TestCase):
     def test_запрещённая_группа_в_allowlist_отклоняется(self):
         for group in ('daemon', 'auth', 'autopilot', 'repo', 'attachment'):
             with self.subTest(group=group):
-                r = self.mutate_policy("('version',): frozenset(),", f"('version',): frozenset(),\n    ('{group}', 'list'): frozenset(),")
+                r = self.mutate_policy("('version',): (READ, ()),", f"('version',): (READ, ()),\n    ('{group}', 'list'): (READ, ()),")
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn('allowlist открывает', r.stderr)
 
     def test_запись_в_agent_и_skill_в_allowlist_отклоняется(self):
         for pair in ("('agent', 'update')", "('agent', 'delete')", "('skill', 'create')", "('runtime', 'list')"):
             with self.subTest(pair=pair):
-                r = self.mutate_policy("('version',): frozenset(),", f"('version',): frozenset(),\n    {pair}: frozenset(),")
+                r = self.mutate_policy("('version',): (READ, ()),", f"('version',): (READ, ()),\n    {pair}: (READ, ()),")
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn('allowlist открывает', r.stderr)
+
+    def test_запись_вне_issue_и_issue_целиком_отклоняются(self):
+        for line, message in (("('agent', 'models'): (WRITE, ())", 'запись вне issue'),
+                              ("('issue',): (WRITE, ())", 'issue целиком'),
+                              ("('issue', 'comment', 'delete'): (WRITE, ())", 'delete в allowlist')):
+            with self.subTest(line=line):
+                r = self.mutate_policy("('version',): (READ, ()),", f"('version',): (READ, ()),\n    {line},")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(message, r.stderr)
 
     def test_расширение_workspace_и_subscription_отклоняется(self):
         for pair in ("('workspace', 'get')", "('subscription', 'create')"):
             with self.subTest(pair=pair):
-                r = self.mutate_policy("('version',): frozenset(),", f"('version',): frozenset(),\n    {pair}: frozenset(),")
+                r = self.mutate_policy("('version',): (READ, ()),", f"('version',): (READ, ()),\n    {pair}: (READ, ()),")
                 self.assertNotEqual(r.returncode, 0)
 
     def test_запуск_через_shell_отклоняется(self):

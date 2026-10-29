@@ -16,7 +16,7 @@ BANNED_GROUPS = {'autopilot', 'pool', 'daemon', 'auth', 'login', 'setup', 'confi
 BANNED_PAIRS = {('agent', 'create'), ('agent', 'update'), ('agent', 'delete'), ('agent', 'mcp'), ('agent', 'skills'),
                 ('skill', 'create'), ('skill', 'update'), ('skill', 'delete'), ('property', 'create'), ('property', 'update'),
                 ('property', 'delete'), ('label', 'create'), ('label', 'update'), ('label', 'delete'), ('runtime', 'list')}
-# Остальное разрешённое — чтение; единственная группа с записью — issue (без delete)
+# Остальное разрешённое — чтение; единственная группа с записью — issue, перечнем и без delete
 ALLOWED_GROUPS = {'issue', 'project', 'agent', 'squad', 'profile', 'workflow', 'label', 'property', 'skill', 'runtime',
                   'subscription', 'workspace', 'version'}
 
@@ -25,15 +25,18 @@ policy = importlib.import_module('multica_tasks.policy')
 assert set(tools.TOOLS) == {'multica'}, f'набор инструментов изменился: {sorted(tools.TOOLS)}'
 assert [t['name'] for t in tools.public_list()] == ['multica'], 'tools/list расходится с TOOLS'
 
-for prefix in policy.ALLOW:
-    assert prefix[0] in ALLOWED_GROUPS, f'allowlist открывает группу {prefix[0]}'
-    assert prefix[0] not in BANNED_GROUPS, f'allowlist открывает группу {prefix[0]}'
-    assert prefix not in BANNED_PAIRS, f'allowlist открывает {" ".join(prefix)}'
-    assert not any(w in ('delete', 'rm', 'remove', 'create', 'update') for w in prefix if prefix[0] != 'issue'), \
-        f'allowlist открывает запись: {" ".join(prefix)}'
-assert ('issue',) in policy.ALLOW and not any(w == 'delete' for p in policy.ALLOW for w in p), 'issue delete в allowlist'
-assert {p for p in policy.ALLOW if p[0] == 'workspace'} == {('workspace', 'list')}, 'workspace: только list'
-assert {p for p in policy.ALLOW if p[0] == 'subscription'} == {('subscription', 'list')}, 'subscription: только list'
+for path, (access, _) in policy.COMMANDS.items():
+    assert path[0] in ALLOWED_GROUPS, f'allowlist открывает группу {path[0]}'
+    assert path[0] not in BANNED_GROUPS, f'allowlist открывает группу {path[0]}'
+    assert path not in BANNED_PAIRS, f'allowlist открывает {" ".join(path)}'
+    assert not any(w in ('delete', 'rm', 'remove', 'create', 'update') for w in path if path[0] != 'issue'), \
+        f'allowlist открывает запись: {" ".join(path)}'
+    assert path[0] == 'issue' or access == policy.READ, f'запись вне issue: {" ".join(path)}'
+assert any(p[0] == 'issue' for p in policy.COMMANDS), 'нет команд issue'
+assert not any(w == 'delete' for p in policy.COMMANDS for w in p), 'delete в allowlist'
+assert ('issue',) not in policy.COMMANDS, 'issue целиком вместо явного перечня'
+assert {p for p in policy.COMMANDS if p[0] == 'workspace'} == {('workspace', 'list')}, 'workspace: только list'
+assert {p for p in policy.COMMANDS if p[0] == 'subscription'} == {('subscription', 'list')}, 'subscription: только list'
 
 sources = {f.name: f.read_text() for f in (work / 'multica_tasks').glob('*.py')}
 for name, text in sources.items():
