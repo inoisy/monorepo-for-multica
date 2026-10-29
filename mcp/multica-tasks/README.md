@@ -1,91 +1,102 @@
 # multica-tasks
 
-Удалённый MCP-сервер задач и ранов Multica. Claude (claude.ai, телефон, Desktop) через custom connector читает задачи и
-раны, комментирует, меняет статус и исполнителя, ставит и отменяет раны. Без открытой вкладки и без CSRF.
+Удалённый MCP-сервер Multica. Claude (claude.ai, телефон, Desktop) и Claude Code на Маках сотрудников через него работают
+с задачами и ранами Multica. Один инструмент `multica`: тот же CLI, что у агентов на сервере, с allowlist подкоманд и
+личным токеном клиента.
 
-Это тонкий адаптер к тому же REST API, которым пользуется `multica` CLI. Новой логики три: дедуп ранов, поиск «зависших»
-задач и аудит записей. Сервер ничего не деплоит и не удаляет: операций harness-control здесь нет.
+Сервер не содержит логики задач: он проверяет команду по allowlist, подставляет токен владельца ключа, запускает CLI без
+shell и пишет аудит. Документация по командам — `--help` самого CLI и скилл `multica`. Ничего не деплоит и не удаляет.
 
-Python 3.12, только stdlib, без сборки. Установка и подключение: `ROOT-STEPS.md` (оператор) и `CONNECT.md` (Евгений).
+Python 3.12, только stdlib. Установка и подключение: `ROOT-STEPS.md` (оператор) и `CONNECT.md` (пользователь).
 
-## Инструменты
+## Инструмент `multica`
 
-| Инструмент | Что делает | Запись |
+| Аргумент | Тип | Смысл |
 |---|---|---|
-| `list_workspaces` | воркспейсы из `MULTICA_MCP_WORKSPACES` | нет |
-| `list_agents` | агенты: статус, текущие раны (`task_id`, задача, статус) | нет |
-| `list_issues` | задачи; фильтры `status`, `assignee`, `stale_minutes`, `limit`, `offset` | нет |
-| `get_issue` | описание, последние K комментариев (по умолчанию 10), раны со статусами | нет |
-| `list_agent_tasks` | последние раны агента | нет |
-| `comment_issue` | комментарий; по умолчанию с префиксом `/note` и без рана | да |
-| `update_issue` | статус и/или исполнитель (агент или сквад) | да |
-| `wake_issue` | поставить исполнителю ровно один ран | да |
-| `cancel_task` | отменить ран по `task_id` | да |
+| `args` | массив строк, обязателен | argv после имени бинаря, например `["issue","get","TST-123"]`; без shell, символы `;`, `$(`, `\|` — обычный текст |
+| `stdin` | строка до 256 КБ | для `--content-stdin` и `--description-stdin`; без stdin процесс получает пустой ввод |
+| `workspace` | строка | slug, имя или id; обязателен, если ключу разрешено больше одного воркспейса |
 
-Во всех инструментах `workspace` — slug, имя или id; можно не указывать, если коннектору разрешён один воркспейс.
-Задача — ключ (`TST-272`) или UUID.
+Ответ: `{"exit_code", "stdout", "stderr", "truncated", "timeout"}`. Код выхода ≠ 0 и таймаут дают `isError: true`.
 
-### Поведение
+- **Запуск.** `subprocess` с argv, `cwd` — пустой временный каталог (`MULTICA_MCP_RUN_DIR`), окружение только
+  `MULTICA_TOKEN`, `MULTICA_SERVER_URL`, `MULTICA_WORKSPACE_ID`, `HOME` (равен `cwd`), `PATH`. Таймаут 30 с, затем kill
+  группы процессов, `exit_code=null`, `timeout=true`. Не больше 4 запусков одновременно.
+- **Вывод.** stdout и stderr по 64 КБ, обрезка с пометкой и `truncated: true`. Секреты маскируются до обрезки, поэтому
+  ключ или токен на границе не утекают половиной.
+- **`--output json`** добавляется, если в `args` нет `--output`, нет `--help`/`-h` и это не `version`. Подкоманда без этого
+  флага (`unknown flag: --output`) запускается повторно без него: флаг разбирается до действия.
+- **Воркспейс.** Список воркспейсов ключа берётся один раз `workspace list` его же токеном; `MULTICA_WORKSPACE_ID` ставится
+  по разрешённому списку. `workspace list`, `version` и `--help` воркспейса не требуют.
 
-- **Зависшие.** `list_issues(stale_minutes=N)` возвращает задачи в `todo` и `in_progress`, у которых исполнитель — агент
-  или сквад, нет активного рана в `/api/agent-task-snapshot` и `last_activity_at` старше N минут. Сначала самые старые.
-  Просматривается до 1000 задач на статус.
-- **Дедуп.** `wake_issue` не ставит ран, если у исполнителя (у сквада — у лидера) есть ран по задаче в статусе
-  `queued`, `dispatched`, `running`, `waiting_local_directory`, `deferred`: ответ `{"result":"already_active","task_id":…}`.
-  Иначе один `POST /rerun` и `{"result":"queued","task_id":…}`. Параллельные вызовы по одной задаче идут через замок
-  задачи внутри процесса. Сервер должен работать в одном экземпляре.
-- **`update_issue`** всегда шлёт `suppress_run: true`: ран ставит только логика `wake_issue`. При смене исполнителя
-  `wake` по умолчанию `true`, при одной смене статуса `false`. Сбой постановки рана после записи не откатывает запись:
-  ответ содержит `wake: {"result":"failed", …}`. Назначить человека нельзя, только агента или сквад.
-- **`comment_issue`** без `wake` публикует `/note <текст>`: ран не создаётся. С `wake=true` комментарий обычный; ответ
-  перечисляет новые раны (`woke`). Платформа сама может поставить ран на такой комментарий поверх уже идущего: чтобы
-  не получить дубль, будите через `wake_issue`.
-- **Ошибки.** Ошибка API или аргументов — `isError: true` и `{"error":{"code","message"}}`. Коды: `invalid_argument`,
-  `forbidden_workspace`, `not_found`, `no_agent_assignee`, `api_<http-код>`, `api_unavailable`, `internal`.
+### Allowlist
+
+Единственная таблица — `ALLOW` в `multica_tasks/policy.py`; тест проверяет каждую строку и каждую запрещённую группу.
+Остальное — JSON-RPC `-32602` с текстом «только по ssh», процесс не запускается, отказ идёт в аудит.
+
+| Префикс argv | Примечание |
+|---|---|
+| `issue *` | все подкоманды (create, update, comment, assign, steer, wakeup, runs, …); у `issue` нет `delete` |
+| `project list\|get` | чтение |
+| `agent list\|get\|models\|tasks` | `agent models` только чтение: `set`, `profile`, `personal`, `single`, `tools`, `reset` запрещены |
+| `squad list`, `squad member list` | чтение |
+| `profile list`, `workflow list`, `label list`, `property list` | чтение |
+| `skill list\|get` | `skill get --with-content` запрещён |
+| `runtime unavailable` | `recheck` запрещён |
+| `subscription list`, `workspace list`, `version` | чтение |
+| `--help`, `-h` | на любой разрешённой команде и группе |
+
+Запрещены везде: флаги `*-file` (`--content-file`, `--description-file`, `--instruction-file`, `--allow-external-file`) и
+`--attach*` — они читают файлы сервера; глобальные `--server-url`, `--profile`, `--workspace-id`, `--debug` — увели бы токен
+на чужой адрес. Запрещены группы `agent` (create/update/delete, mcp, skills), `skill` на запись, `autopilot`, `pool`,
+`subscription` кроме `list`, `runtime` кроме `unavailable`, `daemon`, `auth`, `login`, `setup`, `config`, `update`, `user`,
+`attachment`, `repo`, `property`/`label` на запись, `workspace` кроме `list`.
+
+## Клиенты и ключи
+
+- **Клиент по умолчанию** «Claude (MCP)»: `MULTICA_MCP_KEY` + `MULTICA_PAT` (claude.ai Евгения), воркспейсы из `MULTICA_MCP_WORKSPACES`.
+- **Личные ключи**: файл `MULTICA_MCP_CLIENTS` (путь из env, JSON, права 0600, владелец — пользователь сервиса):
+  `[{"name": "Илья", "key": "…", "token": "mul_…", "workspaces": ["stt"]}]`. Ключ входа → собственный PAT человека, действия
+  в Multica идут от него. Имена и ключи уникальны, ключ от 32 символов. Сервис не стартует, если файл доступен группе или
+  всем. Файл читается на старте: после правки сервис перезапускают.
+- Ключ ищется среди всех клиентов без раннего выхода (`hmac.compare_digest`). Перебор: 10 неверных попыток за минуту с адреса
+  дают 429 (адрес клиента — последний элемент `X-Forwarded-For`, и только с loopback).
 
 ## Безопасность
 
-- **Вход.** `POST /mcp` с `Authorization: Bearer <ключ>`. Ключ сравнивается через `hmac.compare_digest`. Порядок отказов:
-  путь (404), `Host` (403), `Origin` (403), перебор (429 после 10 неудач за минуту с адреса), ключ (401), размер
-  (413 при теле больше 1 МБ). `GET /mcp` — 405. Без сессий и SSE.
-  Неизвестный `MCP-Protocol-Version` — 400 до вызова инструмента.
-- **Периметр.** Caddy пускает на `/mcp` только `160.79.104.0/21` (облако Anthropic) и адреса из
-  `MULTICA_MCP_EXTRA_IPS`; остальным 403. Адрес клиента для аудита — последний элемент `X-Forwarded-For`, и только если
-  запрос пришёл с loopback.
-- **Права в Multica.** Отдельный пользователь «Claude (MCP)» с ролью member и свой PAT. Приватных агентов он вызвать
-  не может. Ключ коннектора и PAT — разные секреты; PAT лежит только в env-файле сервера.
-- **Белый список запросов** (`api.py`): пары метод + шаблон пути. Нет `DELETE`, нет записи в агентов, токены, навыки,
-  MCP-реестр и env. Редиректы не выполняются (токен не уйдёт на чужой адрес).
-- **Проекции** (`projection.py`): наружу идут только перечисленные поля. Инструкций, `custom_env`, MCP-конфигов, путей и
-  результатов ранов в ответах нет. Настроенные ключ и PAT заменяются на `[redacted]` во всех строках ответа API до
-  обрезки полей, включая ошибки ранов; ошибки аргументов инструмента тоже маскируются (`redaction.py`).
-- **Аудит** — `$STATE_DIRECTORY/audit.jsonl`, 0600, по строке на каждый вызов пишущего инструмента, в том числе
-  отказанный: время, инструмент, воркспейс, задача, аргументы (у текста — sha256 и первые 200 символов), результат,
-  `task_id`, IP. Ключ и PAT маскируются до JSON-кодирования. Автор записей в Multica — сервисный пользователь.
-  Превью текста и неверных аргументов маскируются до обрезки; хэш и длина комментария считаются по оригиналу.
+- **Вход.** `POST /mcp` с `Authorization: Bearer <ключ>`. Порядок отказов: путь (404), `Host` (403), `Origin` (403), перебор
+  (429), ключ (401), размер (413 при теле больше 1 МБ). `GET /mcp` — 405. Без сессий и SSE. Неизвестный
+  `MCP-Protocol-Version` — 400 до вызова инструмента.
+- **Периметр.** IP-фильтра в Caddy нет: ключ проверяет сам сервис (`deploy/Caddyfile.fragment`).
+- **Права в Multica.** Определяет PAT: сервис ничего не расширяет, но и не сужает сверх allowlist. Токен идёт только в
+  `MULTICA_TOKEN` процесса и не попадает в аргументы.
+- **Маскирование** (`redaction.py`): ключи и PAT всех клиентов вырезаются из stdout, stderr, сообщений об ошибках и аудита.
+- **Аудит** — `$STATE_DIRECTORY/audit.jsonl`, 0600, строка на каждый вызов: `client`, `client_ip`, `argv`, `exit_code`,
+  `timeout`, `duration`, `stdin_length`, `stdout_length`, `denied`. У `stdin` — sha256, длина и первые 200 символов после
+  маскирования. `denied` — причина отказа allowlist (при отказе `exit_code=null`), иначе `null`.
 - **Юнит** от пользователя `multica-mcp`: `ProtectSystem=strict`, `NoNewPrivileges`, пустой `CapabilityBoundingSet`,
-  фильтр системных вызовов, `MemoryMax=256M`, слушает только `127.0.0.1:8101`.
+  `MemoryMax=256M`, слушает только `127.0.0.1:8101`.
 
 ## Конфигурация
 
-Только из окружения (`/etc/multica-tasks-mcp/env`, 0600), пример — `deploy/env.example`. Обязательные:
-`MULTICA_MCP_KEY` (от 32 символов), `MULTICA_PAT`, `MULTICA_API_URL`, `MULTICA_MCP_WORKSPACES`, `STATE_DIRECTORY`
-(задаёт systemd). Неверная настройка — выход с кодом 2 до открытия порта. Остальное — в `deploy/env.example`.
+Только из окружения (`/etc/multica-tasks-mcp/env`, 0600), пример — `deploy/env.example`. Нужен хотя бы один клиент
+(`MULTICA_MCP_KEY` + `MULTICA_PAT` и/или `MULTICA_MCP_CLIENTS`), `MULTICA_API_URL` (адрес бэкенда для CLI), `STATE_DIRECTORY`
+(задаёт systemd). Неверная настройка — выход с кодом 2 до открытия порта.
 
 ## Тесты
 
 ```sh
-python3 -I -m unittest discover -s mcp/multica-tasks/tests -q
+python3 -I -W error::ResourceWarning -m unittest discover -s mcp/multica-tasks/tests
 ```
 
-Multica API подменяется фейком в процессе (`tests/support.py`), HTTP-обмен идёт через `socketpair`, поэтому тесты
-работают в песочнице harness-control без сети. Два теста настоящего процесса на TCP там пропускаются.
-Вручную с сервером на свободном порту: `MULTICA_MCP_PORT=… python3 -I bin/multica-tasks-mcp`, затем
-`curl -i -X POST localhost:<порт>/mcp` (401), с `-H 'Origin: https://evil.example'` (403), с телом больше 1 МБ (413).
+CLI подменяется фейковым скриптом (`tests/support.py`: пишет argv, окружение и stdin вызова), HTTP-обмен идёт через
+`socketpair`, поэтому тесты работают в песочнице без сети. Два теста настоящего процесса на TCP там пропускаются.
+Вручную: `MULTICA_BIN=<фейк> MULTICA_MCP_PORT=… python3 -I bin/multica-tasks-mcp`, затем `curl -i -X POST localhost:<порт>/mcp`
+(401), с ключом клиента и `{"method":"tools/list"}` (200).
 
 ## Выкладка
 
-Подготовка перехода на compose (STT-454): `Dockerfile`, `compose.yaml` для
+Образ собирается из `Dockerfile` (бинарь `multica` берётся из образа backend, тег закреплён в `ARG MULTICA_BACKEND_IMAGE`: при обновлении платформы поднять его); подготовка перехода на compose: `compose.yaml` для
 изолированного стенда, `deploy/compose.production.yaml` для действующего проекта.
 Переключение и откат — `services/harness-retire/README.md` от корня репозитория.
 После переключения MCP обновляется и откатывается вместе с платформой через
@@ -97,10 +108,9 @@ Multica API подменяется фейком в процессе (`tests/supp
 автооткат. Политика: `services/harness-control/policy.d/multica-tasks-mcp.json`, доверенная проверка:
 `services/harness-control/checks/multica-tasks-mcp/`.
 
-## Чего нет в v1
+## Чего нет
 
-- Создания и удаления задач, правки инструкций, env, навыков и MCP агентов, токенов, секретов, deploy/rollback.
-- OAuth: ключ в заголовке плюс allowlist адресов. OAuth понадобится, если коннектор придётся отдавать другим людям.
-- Поведение платформы «статус → `todo` не будит агента» не меняется: после возврата в `todo` вызывайте `wake_issue`.
-  Дубль «комментарий + переназначение» в диспетчере платформы — отдельная задача; сервер его сам не создаёт.
+- Удаления задач и любых сущностей, правки инструкций, env, навыков и MCP агентов, токенов, секретов, deploy/rollback.
+- OAuth: ключ в заголовке. OAuth понадобится, если коннектор придётся отдавать посторонним.
+- Поведение платформы «статус → `todo` не будит агента» не меняется. Ловушки CLI (какая команда стартует ран) описаны в `CONNECT.md`.
 - Воркспейс со slug `mcp` становится недоступен по пути `/mcp` на этом домене.

@@ -1,19 +1,15 @@
 """Запуск настоящего процесса bin/multica-tasks-mcp: старт, health, SIGTERM, отказ при плохой конфигурации."""
 import http.client
 import json
-import os
 import signal
 import socket
 import subprocess
 import sys
 import time
 import unittest
+from pathlib import Path
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import threading
-from urllib.parse import parse_qs, urlsplit
-
-from support import KEY, PAT, PKG, McpCase, can_listen_tcp
+from support import ILYA_KEY, ILYA_PAT, KEY, PAT, PKG, McpCase, can_listen_tcp
 
 
 def free_port():
@@ -22,43 +18,15 @@ def free_port():
         return s.getsockname()[1]
 
 
-class TcpFake:
-    """Фейковый Multica API по TCP — только для теста настоящего процесса."""
-
-    def __init__(self, fake):
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                url = urlsplit(self.path)
-                headers = {k.title(): v for k, v in self.headers.items()}
-                status, payload = fake.handle('GET', url.path, parse_qs(url.query), headers, None)
-                data = json.dumps(payload).encode()
-                self.send_response(status)
-                self.send_header('Content-Length', str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-
-            def log_message(self, *a):
-                pass
-
-        self.httpd = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-        self.url = f'http://127.0.0.1:{self.httpd.server_address[1]}'
-        threading.Thread(target=self.httpd.serve_forever, kwargs={'poll_interval': 0.02}, daemon=True).start()
-
-    def close(self):
-        self.httpd.shutdown()
-        self.httpd.server_close()
-
-
 @unittest.skipUnless(can_listen_tcp(), 'нет TCP (песочница validate): процесс проверяется в dev и qa')
 class Process(McpCase):
-    def setUp(self):
-        super().setUp()
-        self.tcp_fake = TcpFake(self.fake)
-        self.addCleanup(self.tcp_fake.close)
-
     def env(self, **extra):
-        return {'PATH': '/usr/bin:/bin', 'MULTICA_MCP_KEY': KEY, 'MULTICA_PAT': PAT, 'MULTICA_API_URL': self.tcp_fake.url,
-                'MULTICA_MCP_WORKSPACES': 'stt', 'STATE_DIRECTORY': str(self.state), 'MULTICA_MCP_PORT': str(self.port), **extra}
+        clients = Path(self.tmp.name) / 'clients.json'
+        clients.write_text(json.dumps([{'name': 'Илья', 'key': ILYA_KEY, 'token': ILYA_PAT, 'workspaces': ['stt']}]))
+        clients.chmod(0o600)
+        return {'PATH': '/usr/bin:/bin', 'MULTICA_MCP_KEY': KEY, 'MULTICA_PAT': PAT, 'MULTICA_API_URL': 'http://127.0.0.1:8080',
+                'MULTICA_MCP_WORKSPACES': 'stt', 'STATE_DIRECTORY': str(self.state), 'MULTICA_MCP_PORT': str(self.port),
+                'MULTICA_MCP_CLIENTS': str(clients), 'MULTICA_BIN': str(self.cli.bin), **extra}
 
     def spawn(self, **extra):
         return subprocess.Popen([sys.executable, '-I', str(PKG / 'bin' / 'multica-tasks-mcp')], env=self.env(**extra),
@@ -69,6 +37,17 @@ class Process(McpCase):
         if proc.poll() is None:
             proc.kill()
         proc.communicate()
+
+    def mcp(self, key, method, params=None, status=200):
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        try:
+            conn.request('POST', '/mcp', json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params or {}}),
+                         {'Authorization': f'Bearer {key}', 'Host': '127.0.0.1', 'Content-Type': 'application/json'})
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, status)
+            return json.loads(resp.read())
+        finally:
+            conn.close()
 
     def get(self, path):
         conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=2)
@@ -90,20 +69,26 @@ class Process(McpCase):
                 time.sleep(0.05)
         else:
             self.fail('сервер не поднялся: ' + proc.stderr.read())
-        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=5)
-        conn.request('POST', '/mcp', json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}),
-                     {'Authorization': f'Bearer {KEY}', 'Host': '127.0.0.1'})
-        self.assertEqual(len(json.loads(conn.getresponse().read())['result']['tools']), 9)
-        conn.close()
+        self.assertEqual([t['name'] for t in self.mcp(KEY, 'tools/list')['result']['tools']], ['multica'])
+        call = {'name': 'multica', 'arguments': {'args': ['issue', 'get', 'TST-1']}}
+        result = self.mcp(ILYA_KEY, 'tools/call', call)['result']
+        self.assertEqual(json.loads(result['content'][0]['text'])['exit_code'], 0)
+        self.assertEqual(self.mcp(ILYA_KEY, 'tools/call', {'name': 'multica', 'arguments': {'args': ['agent', 'update', 'x']}})['error']['code'], -32602)
+        self.assertEqual(self.mcp(KEY[:-1] + 'z', 'tools/list', status=401), {'error': 'unauthorized'})
+        self.assertEqual([c['env']['MULTICA_TOKEN'] for c in self.cli.calls if c['argv'][:2] == ['issue', 'get']], [ILYA_PAT])
+        audit = [json.loads(l) for l in (self.state / 'audit.jsonl').read_text().splitlines()]
+        self.assertEqual([(l['client'], bool(l['denied'])) for l in audit], [('Илья', False), ('Илья', True)])
         probe = subprocess.run([sys.executable, '-I', str(PKG / 'deploy' / 'probe.py'), '--smoke'],
                                env=self.env(), capture_output=True, text=True, timeout=15)
         self.assertEqual(probe.returncode, 0, probe.stderr)
-        self.assertIn('healthz=200; unauthenticated=401; tools=9; bad-origin=403', probe.stdout)
+        self.assertIn('healthz=200; unauthenticated=401; tools=1; bad-origin=403', probe.stdout)
         proc.send_signal(signal.SIGTERM)
         self.assertEqual(proc.wait(timeout=10), 0)
         logs = proc.stderr.read()
         self.assertNotIn(KEY, logs)
         self.assertNotIn(PAT, logs)
+        self.assertNotIn(ILYA_PAT, logs)
+        self.assertNotIn(ILYA_KEY, logs)
 
     def test_плохая_конфигурация_завершает_процесс_кодом_2_без_секретов(self):
         self.port = free_port()

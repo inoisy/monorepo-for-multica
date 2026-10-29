@@ -11,13 +11,17 @@ services:
       MULTICA_MCP_HOST: 127.0.0.1
       MULTICA_MCP_PORT: "8101"
       STATE_DIRECTORY: /state
+      MULTICA_MCP_RUN_DIR: /run/multica-cli
     volumes:
       - /var/lib/multica-tasks-mcp:/state
+      # Файл клиентов: владелец — UID/GID сервиса, 0600 (ROOT-STEPS.md, шаг «Личные ключи»)
+      - /etc/multica-tasks-mcp/clients.json:/etc/multica-tasks-mcp/clients.json:ro
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
+      - /run/multica-cli:rw,noexec,nosuid,size=16m,mode=1777
     mem_limit: 256m
     pids_limit: 64
     restart: unless-stopped

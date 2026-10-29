@@ -1,4 +1,4 @@
-"""Сборка и запуск: конфигурация из окружения → сервер. Ключ и PAT в логи не пишутся."""
+"""Сборка и запуск: конфигурация из окружения → сервер. Ключи и PAT в логи не пишутся."""
 import json
 import logging
 import os
@@ -6,10 +6,10 @@ import signal
 import sys
 import threading
 
-from .api import Api
 from .audit import AuditLog
 from .config import Config, ConfigError
 from .http import make_server
+from .runner import Runner
 from .service import Service
 
 
@@ -35,8 +35,7 @@ def main(env=None):
         return 2
     config.state_dir.mkdir(parents=True, exist_ok=True)
     audit = AuditLog(config.state_dir / 'audit.jsonl', config.secrets)
-    api = Api(config.api_url, config.pat, config.api_timeout, config.secrets)
-    server = make_server(config, Service(api, config.workspaces, audit))
+    server = make_server(config, Service(Runner(config), audit))
     # shutdown() блокируется до выхода из serve_forever: из обработчика сигнала зовём его в отдельном потоке
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown).start())
     log.info('слушаю %s:%s', config.host, config.port)

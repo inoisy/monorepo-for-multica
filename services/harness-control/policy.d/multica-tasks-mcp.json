@@ -1,6 +1,6 @@
 {
   "component": "multica-tasks-mcp",
-  "description": "MCP-сервер задач и ранов Multica для Claude (claude.ai): удалённый streamable HTTP за Caddy, только задачи и раны",
+  "description": "MCP-сервер Multica для Claude и агентов сотрудников: удалённый streamable HTTP за Caddy, один инструмент `multica` (CLI с allowlist)",
   "source": {
     "repo": "https://github.com/inoisy/monorepo-for-multica.git",
     "path": "mcp/multica-tasks"
@@ -14,11 +14,6 @@
     {
       "src": "multica_tasks/__init__.py",
       "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/__init__.py",
-      "mode": "0644"
-    },
-    {
-      "src": "multica_tasks/api.py",
-      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/api.py",
       "mode": "0644"
     },
     {
@@ -47,8 +42,8 @@
       "mode": "0644"
     },
     {
-      "src": "multica_tasks/projection.py",
-      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/projection.py",
+      "src": "multica_tasks/policy.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/policy.py",
       "mode": "0644"
     },
     {
@@ -59,6 +54,11 @@
     {
       "src": "multica_tasks/rpc.py",
       "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/rpc.py",
+      "mode": "0644"
+    },
+    {
+      "src": "multica_tasks/runner.py",
+      "dst": "/usr/local/lib/multica-tasks-mcp/multica_tasks/runner.py",
       "mode": "0644"
     },
     {
@@ -81,15 +81,15 @@
       "when_changed": [
         "/usr/local/lib/multica-tasks-mcp/bin/multica-tasks-mcp",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/__init__.py",
-        "/usr/local/lib/multica-tasks-mcp/multica_tasks/api.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/audit.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/cli.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/config.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/errors.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/http.py",
-        "/usr/local/lib/multica-tasks-mcp/multica_tasks/projection.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/policy.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/redaction.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/rpc.py",
+        "/usr/local/lib/multica-tasks-mcp/multica_tasks/runner.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/service.py",
         "/usr/local/lib/multica-tasks-mcp/multica_tasks/tools.py"
       ]
@@ -122,7 +122,7 @@
         "-q"
       ],
       "count_regex": "Ran (\\d+) tests?",
-      "min": 60
+      "min": 50
     }
   },
   "sandbox": {

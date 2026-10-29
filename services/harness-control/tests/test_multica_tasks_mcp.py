@@ -90,21 +90,49 @@ class SmokeCheck(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('набор инструментов изменился', r.stderr)
 
-    def test_delete_в_белом_списке_отклоняется(self):
+    def mutate_policy(self, old, new):
         work = self.candidate_copy()
-        path = work / 'multica_tasks' / 'api.py'
-        path.write_text(path.read_text().replace("('GET', r'/api/workspaces'),", "('GET', r'/api/workspaces'),\n    ('DELETE', rf'/api/issues/{ISSUE}'),"))
-        r = self.run_check(work)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('лишние методы', r.stderr)
+        path = work / 'multica_tasks' / 'policy.py'
+        text = path.read_text()
+        self.assertIn(old, text)
+        path.write_text(text.replace(old, new, 1))
+        return self.run_check(work)
 
-    def test_админский_путь_в_белом_списке_отклоняется(self):
+    def test_запрещённая_группа_в_allowlist_отклоняется(self):
+        for group in ('daemon', 'auth', 'autopilot', 'repo', 'attachment'):
+            with self.subTest(group=group):
+                r = self.mutate_policy("('version',): frozenset(),", f"('version',): frozenset(),\n    ('{group}', 'list'): frozenset(),")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn('allowlist открывает', r.stderr)
+
+    def test_запись_в_agent_и_skill_в_allowlist_отклоняется(self):
+        for pair in ("('agent', 'update')", "('agent', 'delete')", "('skill', 'create')", "('runtime', 'list')"):
+            with self.subTest(pair=pair):
+                r = self.mutate_policy("('version',): frozenset(),", f"('version',): frozenset(),\n    {pair}: frozenset(),")
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn('allowlist открывает', r.stderr)
+
+    def test_расширение_workspace_и_subscription_отклоняется(self):
+        for pair in ("('workspace', 'get')", "('subscription', 'create')"):
+            with self.subTest(pair=pair):
+                r = self.mutate_policy("('version',): frozenset(),", f"('version',): frozenset(),\n    {pair}: frozenset(),")
+                self.assertNotEqual(r.returncode, 0)
+
+    def test_запуск_через_shell_отклоняется(self):
         work = self.candidate_copy()
-        path = work / 'multica_tasks' / 'api.py'
-        path.write_text(path.read_text().replace("('GET', r'/api/workspaces'),", "('GET', r'/api/workspaces'),\n    ('GET', r'/api/tokens'),"))
+        path = work / 'multica_tasks' / 'runner.py'
+        path.write_text(path.read_text().replace("start_new_session=True", "start_new_session=True, shell=True"))
         r = self.run_check(work)
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn('белый список открывает', r.stderr)
+        self.assertIn('запуск через shell', r.stderr)
+
+    def test_delete_в_коде_отклоняется(self):
+        work = self.candidate_copy()
+        path = work / 'multica_tasks' / 'service.py'
+        path.write_text(path.read_text() + "\nMETHOD = 'DELETE'\n")
+        r = self.run_check(work)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('метод DELETE', r.stderr)
 
     def test_сравнение_ключа_без_compare_digest_отклоняется(self):
         work = self.candidate_copy()
