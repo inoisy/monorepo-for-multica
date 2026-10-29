@@ -31,12 +31,12 @@ class Service:
         args, stdin, workspace = tools.validate(arguments)
         entry = {'client': client.name, 'client_ip': client_ip, 'argv': [a[:AUDIT_ARG_CHARS] for a in args]}
         try:
-            prefix = policy.check(args)
+            path = policy.check(args, client.read_only)
         except InvalidParams as e:
             self._audit(entry | {'denied': e.denied, 'exit_code': None})
             raise
         try:
-            workspace_id = self._workspace_id(client, workspace) if policy.needs_workspace(prefix, args) else ''
+            workspace_id = self._workspace_id(client, workspace) if policy.needs_workspace(path, args) else ''
         except InvalidParams as e:
             self._audit(entry | {'denied': e.message, 'exit_code': None})
             raise

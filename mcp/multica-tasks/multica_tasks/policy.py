@@ -1,35 +1,85 @@
-"""Что можно запустить: allowlist по префиксу argv и запрещённые флаги. Единственная таблица — ALLOW."""
+"""Что можно запустить: явный перечень команд COMMANDS, всё остальное запрещено.
+
+Новая подкоманда CLI через MCP недоступна, пока её не внесут в таблицу.
+"""
 from .errors import InvalidParams
 
-# Префикс из слов команды → слова, которые дальше в argv запрещены (подкоманды записи, раскрывающие лишнее).
-ALLOW = {
-    ('issue',): frozenset(),
-    ('project', 'list'): frozenset(),
-    ('project', 'get'): frozenset(),
-    ('agent', 'list'): frozenset(),
-    ('agent', 'get'): frozenset(),
-    ('agent', 'models'): frozenset({'personal', 'profile', 'reset', 'set', 'single', 'tools'}),
-    ('agent', 'tasks'): frozenset(),
-    ('squad', 'list'): frozenset(),
-    ('squad', 'member', 'list'): frozenset(),
-    ('profile', 'list'): frozenset(),
-    ('workflow', 'list'): frozenset(),
-    ('label', 'list'): frozenset(),
-    ('property', 'list'): frozenset(),
-    ('skill', 'list'): frozenset(),
-    ('skill', 'get'): frozenset(),
-    ('runtime', 'unavailable'): frozenset({'recheck'}),
-    ('subscription', 'list'): frozenset(),
-    ('workspace', 'list'): frozenset(),
-    ('version',): frozenset(),
+READ, WRITE = 'read', 'write'
+
+# Путь команды (слова до первого флага) → (доступ, слова, которые дальше в argv запрещены).
+COMMANDS = {
+    ('issue', 'list'): (READ, ()),
+    ('issue', 'get'): (READ, ()),
+    ('issue', 'search'): (READ, ()),
+    ('issue', 'children'): (READ, ()),
+    ('issue', 'pull-requests'): (READ, ()),
+    ('issue', 'timeline'): (READ, ()),
+    ('issue', 'runs'): (READ, ()),
+    ('issue', 'run-messages'): (READ, ()),
+    ('issue', 'usage'): (READ, ()),
+    ('issue', 'comment', 'list'): (READ, ()),
+    ('issue', 'subscriber', 'list'): (READ, ()),
+    ('issue', 'label', 'list'): (READ, ()),
+    ('issue', 'metadata', 'list'): (READ, ()),
+    ('issue', 'metadata', 'get'): (READ, ()),
+    ('issue', 'property', 'list'): (READ, ()),
+    ('issue', 'wakeup', 'list'): (READ, ()),
+    ('issue', 'wakeup', 'get'): (READ, ()),
+    ('issue', 'wakeup', 'runs'): (READ, ()),
+    ('issue', 'wakeup', 'events'): (READ, ()),
+    ('issue', 'create'): (WRITE, ()),
+    ('issue', 'update'): (WRITE, ()),
+    ('issue', 'assign'): (WRITE, ()),
+    ('issue', 'status'): (WRITE, ()),
+    ('issue', 'reorder'): (WRITE, ()),
+    ('issue', 'rerun-task'): (WRITE, ()),
+    ('issue', 'cancel-task'): (WRITE, ()),
+    ('issue', 'steer'): (WRITE, ()),  # и `steer retry`
+    ('issue', 'model-profile'): (WRITE, ()),  # показ и смена одной командой
+    ('issue', 'stages'): (WRITE, ()),  # показ и смена одной командой
+    ('issue', 'comment', 'add'): (WRITE, ()),
+    ('issue', 'comment', 'update'): (WRITE, ()),
+    ('issue', 'comment', 'resolve'): (WRITE, ()),
+    ('issue', 'comment', 'unresolve'): (WRITE, ()),
+    ('issue', 'subscriber', 'add'): (WRITE, ()),
+    ('issue', 'subscriber', 'remove'): (WRITE, ()),
+    ('issue', 'label', 'add'): (WRITE, ()),
+    ('issue', 'label', 'remove'): (WRITE, ()),
+    ('issue', 'metadata', 'set'): (WRITE, ()),
+    ('issue', 'property', 'set'): (WRITE, ()),
+    ('issue', 'property', 'unset'): (WRITE, ()),
+    ('issue', 'wakeup', 'create'): (WRITE, ()),
+    ('issue', 'wakeup', 'update'): (WRITE, ()),
+    ('issue', 'wakeup', 'disable'): (WRITE, ()),
+    ('issue', 'wakeup', 'trigger'): (WRITE, ()),
+    ('issue', 'wakeup', 'checkin'): (WRITE, ()),
+    ('project', 'list'): (READ, ()),
+    ('project', 'get'): (READ, ()),
+    ('agent', 'list'): (READ, ()),
+    ('agent', 'get'): (READ, ()),
+    ('agent', 'tasks'): (READ, ()),
+    ('agent', 'models'): (READ, ('personal', 'profile', 'reset', 'set', 'single', 'tools')),
+    ('squad', 'list'): (READ, ()),
+    ('squad', 'get'): (READ, ()),
+    ('squad', 'member', 'list'): (READ, ()),
+    ('profile', 'list'): (READ, ()),
+    ('workflow', 'list'): (READ, ()),
+    ('label', 'list'): (READ, ()),
+    ('property', 'list'): (READ, ()),
+    ('skill', 'list'): (READ, ()),
+    ('skill', 'get'): (READ, ()),
+    ('runtime', 'unavailable'): (READ, ('recheck',)),
+    ('subscription', 'list'): (READ, ()),
+    ('workspace', 'list'): (READ, ()),
+    ('version',): (READ, ()),
 }
 
 # Команды, которым воркспейс не нужен: справка, версия, список воркспейсов самого человека.
-NO_WORKSPACE_PREFIXES = frozenset({(), ('version',), ('workspace', 'list')})
+NO_WORKSPACE = frozenset({(), ('version',), ('workspace', 'list')})
 
 # Флаги, которые читают файлы сервера или уводят токен на чужой адрес и в чужой профиль.
 GLOBAL_FLAGS = frozenset({'--server-url', '--profile', '--workspace-id', '--debug'})
-FLAGS_BY_PREFIX = {('skill', 'get'): frozenset({'--with-content'})}
+FLAGS_BY_PATH = {('skill', 'get'): frozenset({'--with-content'})}
 HELP_FLAGS = frozenset({'--help', '-h'})
 ONLY_SSH = 'только по ssh'
 
@@ -42,50 +92,62 @@ def _flag_name(token):
     return token.split('=', 1)[0] if token.startswith('--') else token
 
 
-def _forbidden_flag(name, prefix):
+def _forbidden_flag(name, path):
     return (name.endswith('-file') or name.startswith('--attach') or name in GLOBAL_FLAGS
-            or name in FLAGS_BY_PREFIX.get(prefix, ()))
+            or name in FLAGS_BY_PATH.get(path, ()))
+
+
+def _command_path(argv):
+    """Слова до первого флага: флаг между словами (`issue --output json comment delete`) обрывает путь."""
+    words = []
+    for token in argv:
+        if token.startswith('-'):
+            break
+        words.append(token)
+    return tuple(words)
 
 
 def _match(argv):
-    """Самый длинный префикс ALLOW: слова команды стоят первыми, флагов между ними нет."""
-    for prefix in sorted(ALLOW, key=len, reverse=True):
-        if tuple(argv[:len(prefix)]) == prefix:
-            return prefix
+    """Самый длинный путь из COMMANDS, с которого начинаются слова argv."""
+    words = _command_path(argv)
+    for path in sorted(COMMANDS, key=len, reverse=True):
+        if words[:len(path)] == path:
+            return path
     return None
-
-
-def _is_group_help(argv):
-    """`--help`, `agent --help`, `squad member --help`: справка по группе с разрешёнными подкомандами."""
-    if argv == ['--help'] or argv == ['-h']:
-        return True
-    words = argv[:-1]
-    return (argv[-1] in HELP_FLAGS and bool(words) and not any(w.startswith('-') for w in words)
-            and any(prefix[:len(words)] == tuple(words) for prefix in ALLOW))
-
-
-def check(argv):
-    """Бросает InvalidParams (-32602), если команду нельзя запускать; иначе возвращает совпавший префикс."""
-    if not argv:
-        _deny('пустая команда')
-    prefix = _match(argv)
-    if prefix is None:
-        if _is_group_help(argv):
-            return ()
-        _deny(f'команда {" ".join(argv[:3])!r} вне allowlist')
-    for token in argv:
-        if token.startswith('-') and _forbidden_flag(_flag_name(token), prefix):
-            _deny(f'флаг {_flag_name(token)} запрещён')
-    banned = ALLOW[prefix]
-    for token in argv[len(prefix):]:
-        if token in banned:
-            _deny(f'подкоманда {token} запрещена')
-    return prefix
 
 
 def is_help(argv):
     """Справка, только если перед --help нет флагов: в `--title --help` флаг съедает его как значение и команда выполняется."""
     return argv[-1] in HELP_FLAGS and not any(t.startswith('-') for t in argv[:-1])
+
+
+def _is_group_help(argv):
+    """`--help`, `agent --help`, `issue comment --help`: справка по группе с разрешёнными командами."""
+    if not is_help(argv):
+        return False
+    words = tuple(argv[:-1])
+    return any(path[:len(words)] == words for path in COMMANDS)
+
+
+def check(argv, read_only=False):
+    """Бросает InvalidParams (-32602), если команду нельзя запускать; иначе возвращает совпавший путь."""
+    if not argv:
+        _deny('пустая команда')
+    path = _match(argv)
+    if path is None:
+        if _is_group_help(argv):
+            return ()
+        _deny(f'команда {" ".join(_command_path(argv)[:3])!r} вне allowlist')
+    for token in argv:
+        if token.startswith('-') and _forbidden_flag(_flag_name(token), path):
+            _deny(f'флаг {_flag_name(token)} запрещён')
+    access, banned = COMMANDS[path]
+    for token in argv[len(path):]:
+        if token in banned:
+            _deny(f'подкоманда {token} запрещена')
+    if read_only and access == WRITE and not is_help(argv):
+        _deny(f'команда {" ".join(path)!r} меняет данные, а ключ только для чтения')
+    return path
 
 
 def wants_output_flag(argv):
@@ -95,5 +157,5 @@ def wants_output_flag(argv):
     return not any(t == '--output' or t.startswith('--output=') for t in argv)
 
 
-def needs_workspace(prefix, argv):
-    return prefix not in NO_WORKSPACE_PREFIXES and not is_help(argv)
+def needs_workspace(path, argv):
+    return path not in NO_WORKSPACE and not is_help(argv)

@@ -9,6 +9,7 @@ MIN_KEY_LENGTH = 32
 DEFAULT_ORIGINS = ('https://claude.ai', 'https://claude.com')
 DEFAULT_HOSTS = ('multica.yakutov.com', '127.0.0.1', 'localhost')
 DEFAULT_CLIENT = 'Claude (MCP)'
+TRUE = ('1', 'true', 'yes')
 
 
 class ConfigError(ValueError):
@@ -26,6 +27,7 @@ class Client:
     key: str
     token: str
     workspaces: tuple
+    read_only: bool = False  # только команды чтения
 
 
 def load_clients(path, default_workspaces):
@@ -55,7 +57,10 @@ def load_clients(path, default_workspaces):
         if not isinstance(workspaces, list) or not workspaces or not all(isinstance(w, str) and w.strip() for w in workspaces):
             raise ConfigError(f'MULTICA_MCP_CLIENTS[{i}]: workspaces — непустой массив строк '
                               '(или задайте MULTICA_MCP_WORKSPACES по умолчанию)')
-        clients.append(Client(name.strip(), key.strip(), token.strip(), tuple(w.strip() for w in workspaces)))
+        read_only = row.get('read_only', False)
+        if not isinstance(read_only, bool):
+            raise ConfigError(f'MULTICA_MCP_CLIENTS[{i}]: read_only — true или false')
+        clients.append(Client(name.strip(), key.strip(), token.strip(), tuple(w.strip() for w in workspaces), read_only))
     return clients
 
 
@@ -101,7 +106,8 @@ class Config:
                 raise ConfigError(f'MULTICA_MCP_KEY короче {MIN_KEY_LENGTH} символов')
             if not default_workspaces:
                 raise ConfigError('MULTICA_MCP_WORKSPACES: пустой список')
-            clients.append(Client(DEFAULT_CLIENT, key, need('MULTICA_PAT'), default_workspaces))
+            read_only = env.get('MULTICA_MCP_READ_ONLY', '').strip().lower() in TRUE
+            clients.append(Client(DEFAULT_CLIENT, key, need('MULTICA_PAT'), default_workspaces, read_only))
         if env.get('MULTICA_MCP_CLIENTS', '').strip():
             clients += load_clients(env['MULTICA_MCP_CLIENTS'].strip(), default_workspaces)
         if not clients:

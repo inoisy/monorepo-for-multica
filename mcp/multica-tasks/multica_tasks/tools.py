@@ -1,20 +1,22 @@
 """Схема единственного инструмента `multica` и проверка аргументов. Поведение — в service.py."""
+from . import policy
 from .errors import InvalidParams
 
 MAX_ARGS = 200
 MAX_ARG_LENGTH = 16000
 MAX_STDIN_BYTES = 256 * 1024
 
+DESCRIPTION = (
+    'Командная строка Multica (тот же `multica` CLI, что у агентов), от имени владельца ключа. '
+    'args — argv без имени бинаря: ["issue","get","TST-123"]. Длинный текст — через stdin и флаги '
+    '--content-stdin / --description-stdin; флаги *-file и --attach* запрещены. По умолчанию ответ в JSON '
+    '(--output json добавляется сам). Справка: ["issue","create","--help"]. Доступны команды: {commands}; '
+    'остальное, включая удаление, — только по ssh. Ловушки: issue create/update --assignee и issue assign --to сразу '
+    'стартуют ран; issue comment add будит исполнителя; снять исполнителя — issue assign <KEY> --unassign.')
+
 TOOLS = {
     'multica': {
-        'description': (
-            'Командная строка Multica (тот же `multica` CLI, что у агентов), от имени владельца ключа. '
-            'args — argv без имени бинаря: ["issue","get","TST-123"]. Длинный текст — через stdin и флаги '
-            '--content-stdin / --description-stdin; флаги *-file и --attach* запрещены. По умолчанию ответ в JSON '
-            '(--output json добавляется сам). Справка: ["issue","create","--help"]. Доступны issue *, чтение '
-            'project/agent/squad/profile/workflow/label/property/skill/runtime unavailable/subscription/workspace; '
-            'остальное — только по ssh. Ловушки: issue create/update --assignee и issue assign --to сразу '
-            'стартуют ран; issue comment add будит исполнителя; снять исполнителя — issue assign <KEY> --unassign.'),
+        'description': DESCRIPTION.format(commands=', '.join(' '.join(path) for path in policy.COMMANDS)),
         'inputSchema': {
             'type': 'object',
             'properties': {

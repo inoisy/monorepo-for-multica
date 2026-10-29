@@ -93,7 +93,7 @@ class Transport(McpCase):
         status, _ = self.rpc('tools/call', call, headers={'MCP-Protocol-Version': '2099-01-01'})
         self.assertEqual(status, 400)
         self.assertEqual(self.cli.calls, [])
-        for version in ('2025-03-26', '2025-06-18'):
+        for version in ('2025-03-26', '2025-06-18', '2025-11-25'):
             self.assertEqual(self.rpc('ping', headers={'MCP-Protocol-Version': version})[0], 200)
 
     def test_iserror_по_коду_выхода(self):
@@ -157,6 +157,14 @@ class Settings(McpCase):
         self.assertEqual((c.api_url, c.port, str(c.state_dir)), ('http://127.0.0.1:8080', 8101, '/var/lib/x'))
         self.assertEqual(c.clients, (Client('Claude (MCP)', 'k' * 32, 'p', ('stt', 'toons')),))
         self.assertEqual(c.host, '127.0.0.1')
+
+    def test_только_чтение_у_клиента_по_умолчанию_и_в_файле(self):
+        self.assertTrue(Config.from_env({**self.ENV, 'MULTICA_MCP_READ_ONLY': 'true'}).clients[0].read_only)
+        self.assertFalse(Config.from_env(self.ENV).clients[0].read_only)
+        path = self.clients_file([self.good_row(read_only=True)])
+        self.assertTrue(Config.from_env({**self.ENV, 'MULTICA_MCP_CLIENTS': path}).clients[1].read_only)
+        with self.assertRaises(ConfigError):
+            Config.from_env({**self.ENV, 'MULTICA_MCP_CLIENTS': self.clients_file([self.good_row(read_only='да')])})
 
     def test_файл_клиентов_добавляется_к_клиенту_по_умолчанию(self):
         path = self.clients_file([self.good_row(workspaces=['stt']), self.good_row(name='Анна', key='a' * 32)])
