@@ -24,12 +24,12 @@ def main():
             raise RuntimeError('unauthenticated MCP request must fail')
         headers = {'Authorization': 'Bearer ' + os.environ['MULTICA_MCP_KEY'], 'Content-Type': 'application/json'}
         status, data = request('POST', '/mcp', json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}), headers)
-        if status != 200 or len(json.loads(data)['result']['tools']) != 9:
-            raise RuntimeError('MCP tool list failed')
+        if status != 200 or [t['name'] for t in json.loads(data)['result']['tools']] != ['multica']:
+            raise RuntimeError('MCP tool list must be exactly one tool: multica')
         status, _ = request('POST', '/mcp', '{}', dict(headers, Origin='https://evil.example'))
         if status != 403:
             raise RuntimeError('untrusted Origin must fail')
-        print('healthz=200; unauthenticated=401; tools=9; bad-origin=403')
+        print('healthz=200; unauthenticated=401; tools=1; bad-origin=403')
     return 0
 
 

@@ -10,7 +10,10 @@ services:
       MULTICA_MCP_HOST: 0.0.0.0
       MULTICA_MCP_ALLOWED_HOSTS: localhost,127.0.0.1,${STAND_NAME:-local}.stand.yakutov.com
       STATE_DIRECTORY: /state
+      MULTICA_MCP_RUN_DIR: /run/multica-cli
     expose: ["8101"]
+    tmpfs:
+      - /run/multica-cli:rw,noexec,nosuid,size=16m,mode=1777
     volumes:
       - audit:/state
 volumes:

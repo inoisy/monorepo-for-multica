@@ -2,9 +2,10 @@
 import json
 
 from . import tools
+from .errors import InvalidParams
 
 PROTOCOLS = ('2025-06-18', '2025-03-26', '2024-11-05')
-SERVER_INFO = {'name': 'multica-tasks', 'version': '1.0.0'}
+SERVER_INFO = {'name': 'multica-tasks', 'version': '2.0.0'}
 
 
 def _error(msg_id, code, message):
@@ -15,7 +16,7 @@ def _result(msg_id, result):
     return {'jsonrpc': '2.0', 'id': msg_id, 'result': result}
 
 
-def handle(message, service, client_ip=''):
+def handle(message, service, client_ip='', client=None):
     """Ответ-словарь или None для уведомлений."""
     if not isinstance(message, dict) or message.get('jsonrpc') != '2.0' or not isinstance(message.get('method'), str):
         return _error(message.get('id') if isinstance(message, dict) else None, -32600, 'invalid request')
@@ -37,7 +38,11 @@ def handle(message, service, client_ip=''):
         name = params.get('name')
         if not isinstance(name, str) or not name:
             return _error(msg_id, -32602, 'name: нужна непустая строка')
-        is_error, payload = service.call_tool(name, params.get('arguments'), client_ip)
+        try:
+            is_error, payload = service.call_tool(name, params.get('arguments') or {}, client_ip, client)
+        except InvalidParams as e:
+            # сообщение повторяет ввод клиента: маскируем секреты и здесь
+            return _error(msg_id, -32602, service.redact(e.message))
         # isError — по признаку ошибки из сервиса, а не по наличию ключа в теле
         return _result(msg_id, {'content': [{'type': 'text', 'text': json.dumps(payload, ensure_ascii=False)}],
                                 'isError': bool(is_error)})

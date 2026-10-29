@@ -1,4 +1,13 @@
-"""Ошибки инструментов: код + текст, без секретов. Всё, что не ToolError, наружу текстом не уходит."""
+"""Ошибки сервера: InvalidParams уходит JSON-RPC -32602, ToolError — результатом инструмента с isError."""
+
+
+class InvalidParams(Exception):
+    """Аргументы или команда не прошли проверку: процесс не запускался."""
+
+    def __init__(self, message, denied=None):
+        super().__init__(message)
+        self.message = message
+        self.denied = denied  # причина отказа allowlist для аудита; None — ошибка формы аргументов
 
 
 class ToolError(Exception):
@@ -9,16 +18,3 @@ class ToolError(Exception):
 
     def to_dict(self):
         return {'error': {'code': self.code, 'message': self.message}}
-
-
-class ApiError(Exception):
-    """Ответ Multica API с ошибкой или сбой связи. status=0 — не достучались."""
-
-    def __init__(self, status, message):
-        super().__init__(message)
-        self.status = status
-        self.message = message
-
-
-class ForbiddenCall(Exception):
-    """Вызов вне белого списка (метод, шаблон пути): ошибка программиста, а не пользователя."""

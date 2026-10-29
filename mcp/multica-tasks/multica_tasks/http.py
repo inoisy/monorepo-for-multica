@@ -41,7 +41,7 @@ def _host_name(header):
 
 
 def make_handler(config, service, limiter):
-    key = config.key.encode()
+    keys = [(c, c.key.encode()) for c in config.clients]
 
     class Handler(BaseHTTPRequestHandler):
         server_version = 'multica-tasks-mcp'
@@ -82,13 +82,18 @@ def make_handler(config, service, limiter):
             # тело запроса не читали: соединение закрываем, иначе остаток тела станет «следующим запросом»
             self.send_json(status, {'error': message}, headers, close=True)
 
-        def authorized(self, ip):
+        def authenticate(self, ip):
+            """Клиент по ключу или None. Сравнение со всеми ключами без раннего выхода: время не выдаёт, какой подошёл."""
             header = self.headers.get('Authorization', '')
             scheme, _, token = header.partition(' ')
-            ok = scheme.lower() == 'bearer' and hmac.compare_digest(token.strip().encode(), key)
-            if not ok:
+            candidate = token.strip().encode()
+            found = None
+            for client, key in keys:
+                if hmac.compare_digest(candidate, key) and scheme.lower() == 'bearer':
+                    found = client
+            if found is None:
                 limiter.fail(ip)
-            return ok
+            return found
 
         def route(self):
             path = self.path.split('?')[0]
@@ -104,16 +109,17 @@ def make_handler(config, service, limiter):
             ip = self.client_ip()
             if limiter.blocked(ip):
                 return self.reject(429, 'too many failed attempts', [('Retry-After', str(int(config.auth_fail_window)))])
-            if not self.authorized(ip):
+            client = self.authenticate(ip)
+            if client is None:
                 return self.reject(401, 'unauthorized', [('WWW-Authenticate', 'Bearer')])
             if self.command != 'POST':
                 return self.reject(405, 'use POST', [('Allow', 'POST')])
             version = self.headers.get('MCP-Protocol-Version')
             if version is not None and version not in rpc.PROTOCOLS:
                 return self.reject(400, 'unsupported MCP protocol version')
-            self.post_mcp(ip)
+            self.post_mcp(ip, client)
 
-        def post_mcp(self, ip):
+        def post_mcp(self, ip, client):
             length = self.headers.get('Content-Length')
             if length is None or not length.isdigit():
                 return self.reject(411, 'Content-Length required')
@@ -126,7 +132,7 @@ def make_handler(config, service, limiter):
             if isinstance(message, list):
                 return self.send_json(400, {'jsonrpc': '2.0', 'id': None,
                                             'error': {'code': -32600, 'message': 'batch не поддерживается'}})
-            response = rpc.handle(message, service, ip)
+            response = rpc.handle(message, service, ip, client)
             if response is None:
                 return self.send_json(202)
             self.send_json(200, response)

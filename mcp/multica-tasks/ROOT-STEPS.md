@@ -49,6 +49,8 @@ echo "Ключ для claude.ai (запишите, повторно не пок�
 ```
 
 Список воркспейсов — slug через запятую (`stt,toons,sirius-qi2i`); пользователь «Claude (MCP)» должен быть в них членом.
+Для личных ключей добавить в env строку `MULTICA_MCP_CLIENTS=/etc/multica-tasks-mcp/clients.json` (шаг 8). Сервису нужен бинарь
+`/usr/local/bin/multica` (в образе он есть; для systemd-установки — тот же, что у агентов).
 
 ## Шаг 5. Запуск (root)
 
@@ -71,18 +73,11 @@ $EDITOR /etc/caddy/Caddyfile
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && systemctl reload caddy
 ```
 
-Claude Code с ноутбука: добавить его адрес в окружение Caddy
-(`systemctl edit caddy` → `[Service]` `Environment=MULTICA_MCP_EXTRA_IPS=<ip>/32`), `systemctl restart caddy`.
-По умолчанию переменная пуста, и пускают только `160.79.104.0/21` (облако Anthropic).
-
-Проверка с любого не-Anthropic адреса (ожидаем 403):
+IP-фильтра нет (снят 29.10.2026): вход только по Bearer-ключу, который проверяет сервис. Проверка без ключа (ожидаем 401):
 
 ```sh
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://multica.yakutov.com/mcp
 ```
-
-Ответ «с разрешённого адреса без ключа — 401» увидит только запрос из облака Anthropic; локально его можно воспроизвести,
-временно задав `MULTICA_MCP_EXTRA_IPS` адресом проверяющей машины.
 
 ## Шаг 7. Политика harness-control (root)
 
@@ -96,7 +91,42 @@ bash bootstrap/install.sh --upgrade
 harness-control inspect multica-tasks-mcp   # дрейфа нет, health ok
 ```
 
-## Шаг 8. Подключить коннектор
+## Шаг 8. Личные ключи сотрудников (root)
+
+Файл клиентов читает сам сервис: владелец — UID/GID контейнера (`MULTICA_MCP_UID:MULTICA_MCP_GID`), права `0600`,
+иначе сервис не стартует. Если юнит старый (systemd) — владелец `multica-mcp`.
+
+```sh
+umask 077
+read -rsp 'PAT сотрудника (mul_…): ' EMP_PAT; echo
+EMP_KEY=$(openssl rand -hex 32)
+FILE=/etc/multica-tasks-mcp/clients.json
+[ -f "$FILE" ] || echo '[]' > "$FILE"
+cp -a "$FILE" "$FILE.bak-$(date +%Y%m%d%H%M%S)"
+NAME='Илья' KEY="$EMP_KEY" PAT="$EMP_PAT" WS='stt' FILE="$FILE" python3 -I - <<'PY'
+import json, os
+rows = json.load(open(os.environ['FILE']))
+rows.append({'name': os.environ['NAME'], 'key': os.environ['KEY'], 'token': os.environ['PAT'], 'workspaces': [os.environ['WS']]})
+json.dump(rows, open(os.environ['FILE'], 'w'), ensure_ascii=False, indent=2)
+PY
+chown "$(stat -c '%u:%g' /var/lib/multica-tasks-mcp)" "$FILE"; chmod 0600 "$FILE"
+echo "Ключ для сотрудника (повторно не показывается): $EMP_KEY"; unset EMP_KEY EMP_PAT
+```
+
+В `/etc/multica-tasks-mcp/env` должна быть строка `MULTICA_MCP_CLIENTS=/etc/multica-tasks-mcp/clients.json`. Затем перезапустить
+сервис (контейнер: `docker compose … up -d multica-tasks-mcp`; systemd: `systemctl restart multica-tasks-mcp`).
+
+Проверка: из Claude Code сотрудника `{"args": ["issue", "get", "TST-123"]}`; запрещённая команда `{"args": ["agent", "update", "x"]}`
+даёт отказ «только по ssh»; в `/var/lib/multica-tasks-mcp/audit.jsonl` появляются записи с `"client": "Илья"`, среди них один
+отказ (`"denied"` не `null`):
+
+```sh
+grep '"client": "Илья"' /var/lib/multica-tasks-mcp/audit.jsonl | tail -3
+```
+
+Откат: вернуть `clients.json.bak-*` и перезапустить сервис; клиент по умолчанию работает без файла.
+
+## Шаг 9. Подключить коннектор
 
 `CONNECT.md`: адрес `https://multica.yakutov.com/mcp`, заголовок `Authorization: Bearer <ключ из шага 4>`.
 

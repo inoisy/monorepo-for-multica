@@ -1,4 +1,4 @@
-"""Аудит записей: JSONL в $STATE_DIRECTORY/audit.jsonl (0600). Ключ MCP и PAT вырезаются из строки целиком."""
+"""Аудит записей: JSONL в $STATE_DIRECTORY/audit.jsonl (0600). Ключи клиентов и их PAT вырезаются из строки целиком."""
 import hashlib
 import json
 import os
@@ -17,7 +17,7 @@ def text_digest(text, redact):
 
 class AuditLog:
     def __init__(self, path, secrets=(), clock=time.time):
-        self.path, self._redact, self._clock = path, Redactor(secrets), clock
+        self.path, self.redact, self._clock = path, Redactor(secrets), clock
         self._lock = threading.Lock()
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         os.close(fd)
@@ -25,7 +25,7 @@ class AuditLog:
 
     def write(self, **fields):
         entry = {'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(self._clock())), **fields}
-        line = json.dumps(self._redact(entry), ensure_ascii=False, sort_keys=True)
+        line = json.dumps(self.redact(entry), ensure_ascii=False, sort_keys=True)
         with self._lock:
             fd = os.open(self.path, os.O_WRONLY | os.O_APPEND)
             try:
