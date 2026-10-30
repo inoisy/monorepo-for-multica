@@ -259,6 +259,13 @@ class CookieParsing(unittest.TestCase):
         self.assertEqual(parse(''), ('', ''))
         self.assertEqual(parse('мусор;;;='), ('', ''))
 
+    def test_чужие_cookie_с_пробелом_и_кавычками_не_прячут_сессию(self):
+        from multica_tasks.multica_auth import session_from_cookie_header as parse
+        for header in ('theme={"a": 1}; multica_auth=S; multica_csrf=c', 'a=b c; multica_auth=S; multica_csrf=c',
+                       'a="unterminated; multica_auth=S; multica_csrf=c', 'multica_auth="S"; multica_csrf=c'):
+            self.assertEqual(parse(header), ('S', 'c'), header)
+        self.assertEqual(parse('multica_auth=S; multica_auth=other'), ('S', ''))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -7,7 +7,6 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from http.cookies import CookieError, SimpleCookie
 
 SESSION_COOKIE = 'multica_auth'
 CSRF_COOKIES = ('multica_csrf_session', 'multica_csrf')  # какое из двух принимает сервер, зависит от версии сессии
@@ -40,14 +39,21 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def session_from_cookie_header(header):
-    """(значение сессионной cookie, значение для X-CSRF-Token) из заголовка Cookie браузера; пустые строки, если нет."""
-    jar = SimpleCookie()
-    try:
-        jar.load(header or '')
-    except CookieError:
-        return '', ''
-    session = jar[SESSION_COOKIE].value if SESSION_COOKIE in jar else ''
-    csrf = next((jar[n].value for n in CSRF_COOKIES if n in jar and jar[n].value), '')
+    """(значение сессионной cookie, значение для X-CSRF-Token) из заголовка Cookie браузера; пустые строки, если нет.
+
+    Разбор по парам «имя=значение» через «;», как у Go net/http в Multica: SimpleCookie молча обрывает разбор на чужой
+    cookie с пробелом или кавычкой, и вошедший пользователь выглядел бы невошедшим. Повтор имени — берём первое.
+    """
+    jar = {}
+    for part in (header or '').split(';'):
+        name, sep, value = part.strip().partition('=')
+        value = value.strip()
+        if len(value) > 1 and value[0] == value[-1] == '"':
+            value = value[1:-1]
+        if sep and name and name not in jar:
+            jar[name] = value
+    session = jar.get(SESSION_COOKIE, '')
+    csrf = next((jar[n] for n in CSRF_COOKIES if jar.get(n)), '')
     return session, csrf
 
 
