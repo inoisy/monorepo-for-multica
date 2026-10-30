@@ -222,7 +222,7 @@ class OAuthService:
         if not pending:
             return None
         client = self.store.get_client(pending['client_id'])
-        return {'client_name': client['name'], 'return_host': urlsplit(pending['redirect_uri']).hostname}
+        return {'client_name': client['name'], 'return_host': urlsplit(pending['redirect_uri']).netloc}
 
     def whoami(self, cookie_header):
         """Пользователь Multica по сессии браузера или None, если не вошёл. Unavailable — Multica не ответила."""

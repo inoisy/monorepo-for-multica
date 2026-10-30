@@ -89,7 +89,8 @@ def make_handler(config, service, limiter, oauth=None):
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('X-Frame-Options', 'DENY')
-            self.send_header('Referrer-Policy', 'no-referrer')
+            # не no-referrer: при такой политике браузер шлёт в POST формы Origin: null, и согласие не пройти
+            self.send_header('Referrer-Policy', 'same-origin')
             self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
             for name, value in headers:
                 self.send_header(name, value)

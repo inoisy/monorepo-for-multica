@@ -168,6 +168,26 @@ class Consent(OAuthCase):
         self.assertNotIn('<script>alert', html.decode())
         self.assertIn('&lt;script&gt;', html.decode())
 
+    def test_страница_согласия_не_ломает_origin_формы(self):
+        # no-referrer заставляет браузер слать в POST формы Origin: null, а он отклоняется
+        _, _, resp = self.consent_page(self.req)
+        self.assertEqual(resp.getheader('Referrer-Policy'), 'same-origin')
+
+    def test_origin_публичного_адреса_проходит_а_null_и_чужой_нет(self):
+        _, html, _ = self.consent_page(self.req)
+        csrf = self.csrf_of(html)
+        for origin in ('null', 'https://evil.example', 'http://multica.yakutov.com'):
+            with self.subTest(origin=origin):
+                self.assertEqual(self.decide(self.req, csrf, headers={'Origin': origin})[0], 403)
+        self.assertEqual(self.multica.created, [])
+        self.assertEqual(self.decide(self.req, csrf, headers={'Origin': 'https://multica.yakutov.com'})[0], 302)
+
+    def test_адрес_возврата_loopback_показывается_с_портом(self):
+        cid = self.client_id(['http://localhost:54321/callback'])
+        req = self.request_id(cid, self.challenge, redirect_uri='http://localhost:54321/callback')
+        _, html, _ = self.consent_page(req)
+        self.assertIn('localhost:54321', html.decode())
+
     def test_согласие_выдаёт_code_и_pat_с_конечным_сроком(self):
         _, html, _ = self.consent_page(self.req)
         status, _, resp = self.decide(self.req, self.csrf_of(html))
