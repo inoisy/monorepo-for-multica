@@ -1,9 +1,12 @@
 # Вставить в блок `multica.yakutov.com { … }` в /etc/caddy/Caddyfile — до последней строки `reverse_proxy 127.0.0.1:3000`,
-# рядом с /control и /feedback. Подробности и проверка — ROOT-STEPS.md.
+# рядом с /control и /feedback. Блок между маркерами `>>> multica-tasks-mcp` и `<<< multica-tasks-mcp` заменяется целиком
+# (это делает скрипт оператора, ROOT-STEPS.md). Подробности и проверка — там же.
 #
-# IP-фильтра нет: доступ по Bearer-ключу, который проверяет сам сервис (личные ключи клиентов, лимит неверных попыток
-# с адреса). Сервер получает адрес клиента из заголовка, который выставляет Caddy.
-	@mcp path /mcp
+# IP-фильтра нет: доступ по OAuth-токену или Bearer-ключу, которые проверяет сам сервис (лимит неверных попыток с адреса).
+# Проксируются только точные пути: /mcp, /mcp/oauth/* и три адреса discovery. /login и всё остальное остаются у Multica.
+# Сервер получает адрес клиента из заголовка, который выставляет Caddy.
+	# >>> multica-tasks-mcp (STT-272, STT-506)
+	@mcp path /mcp /mcp/oauth/* /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/mcp /.well-known/oauth-authorization-server
 	handle @mcp {
 		request_body {
 			max_size 1MB
@@ -13,3 +16,4 @@
 			header_up X-Forwarded-For {remote_host}
 		}
 	}
+	# <<< multica-tasks-mcp
