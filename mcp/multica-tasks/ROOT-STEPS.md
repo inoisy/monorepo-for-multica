@@ -73,7 +73,10 @@ $EDITOR /etc/caddy/Caddyfile
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && systemctl reload caddy
 ```
 
-IP-фильтра нет (снят 29.10.2026): вход только по Bearer-ключу, который проверяет сервис. Проверка без ключа (ожидаем 401):
+IP-фильтра нет (снят 29.10.2026): вход по Bearer-ключу или OAuth-токену, которые проверяет сам сервис. Блок проксирует точные пути
+`/mcp`, `/mcp/oauth/*` и три адреса discovery (`/.well-known/oauth-protected-resource[/mcp]`, `/.well-known/oauth-authorization-server`);
+`/login` и всё остальное остаётся у Multica. При вставке вручную блок между маркерами `>>> multica-tasks-mcp` и `<<< multica-tasks-mcp`
+заменяется целиком (для действующего сервера это делает скрипт шага 10). Проверка без ключа (ожидаем 401):
 
 ```sh
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://multica.yakutov.com/mcp
@@ -138,7 +141,67 @@ grep '"client": "Илья"' /var/lib/multica-tasks-mcp/audit.jsonl | tail -3
 
 ## Шаг 9. Подключить коннектор
 
-`CONNECT.md`: адрес `https://multica.yakutov.com/mcp`, заголовок `Authorization: Bearer <ключ из шага 4>`.
+`CONNECT.md`: адрес `https://multica.yakutov.com/mcp`, вход через Multica (OAuth). Ключ из шага 4 и заголовок — запасной путь.
+
+## Шаг 10. Вход через OAuth (STT-506)
+
+Хост `marcelle`, пользователь `root`. Готовый скрипт лежит в `/home/agents/ops/stt-506/` (копия — `deploy/enable-oauth.sh`, тест
+сверяет её встроенные compose и блок Caddy с файлами репозитория). Скрипт идемпотентный, запускается **дважды** — до и после
+выкатки образа:
+
+```sh
+sudo bash /home/agents/ops/stt-506/apply.sh --check     # только проверки, ничего не меняет
+sudo bash /home/agents/ops/stt-506/apply.sh             # подготовка; если образ уже с OAuth — включение и проверка
+```
+
+Порядок:
+1. `apply.sh` (до слияния). Образ ещё без OAuth, поэтому скрипт только готовит: создаёт ключ Fernet `/etc/multica-tasks-mcp/oauth.key`
+   (владелец — UID/GID сервиса, `0600`, существующий ключ не перезаписывает), `clients.json` (`[]`, если нет) и строку
+   `MULTICA_MCP_CLIENTS` в env, пишет `/opt/multica/docker-compose.mcp.yml` (строка `user:` сохраняется; добавлены
+   `MULTICA_MCP_OAUTH_KEY_FILE`, `MULTICA_MCP_PUBLIC_URL`, монтирование ключа). Контейнер и Caddy не трогает. Итог: «ПОДГОТОВЛЕНО».
+2. Человек сливает PR 33 в `main` монорепо, затем pin-PR `deploy/autodeploy/mcp-image` в `inoisy/multica` (образ из CI на этом
+   коммите). `multica-autodeploy` пересоздаёт контейнер: OAuth включается по compose, Bearer-ключи работают как раньше.
+3. `apply.sh` ещё раз (после автодеплоя). Образ уже с OAuth: скрипт заменяет блок Caddy (`caddy validate`, затем reload), пересоздаёт
+   контейнер, ждёт `healthz=200` и прогоняет публичную проверку: 401 с `resource_metadata`, три документа discovery, DCR,
+   `authorize` с PKCE S256, переход на `/login?next=`, отказ PKCE `plain`, `/login` отдаёт Multica. Итог: «ВКЛЮЧЕНО».
+
+Бэкапы (каталоги `0700`, три отдельных места): env, compose, Caddyfile, clients.json — `/root/mcp-oauth/<метка>/`; ключ —
+`/root/mcp-oauth-keys/oauth-<отпечаток>.key`; `oauth.sqlite` — `/root/mcp-oauth-db/oauth-<метка>.sqlite` (снимок через
+API SQLite, если файл уже есть). Ключ и база не хранятся рядом. Потеря ключа не раскрывает данные, но выданные PAT станут
+нечитаемы: пользователям придётся подключиться заново.
+
+Сбой после первого изменения — скрипт сам откатывает env, compose, clients.json, Caddyfile и пересоздаёт контейнер.
+
+Откат вручную (после успешного запуска; каталог напечатан в конце):
+
+```sh
+sudo bash /home/agents/ops/stt-506/apply.sh --rollback /root/mcp-oauth/<метка>
+```
+
+Откат отключает OAuth (прежний compose без ключа, Caddy без маршрутов OAuth), ключ и `oauth.sqlite` сохраняются; Bearer-ключи
+работают. Образ откатывает `multica-autodeploy` (revert pin-PR); откат образа без отката compose безопасен: старый образ
+игнорирует OAuth-переменные.
+
+Статус в любой момент (только чтение; образ, health, права ключа, число клиентов и действующих grant-ов, последние записи аудита):
+
+```sh
+sudo bash /home/agents/ops/stt-506/status.sh
+bash /home/agents/ops/stt-506/apply.sh --verify-only      # публичная проверка, root не нужен
+```
+
+### Проверка выкатки: настоящий `issue get` через OAuth
+
+`/healthz` и публичная проверка скрипта не заменяют вход в браузере. После «ВКЛЮЧЕНО»:
+1. На своём Маке: `claude mcp add --transport http multica https://multica.yakutov.com/mcp` (без `--header`), затем в сессии
+   `/mcp` → `multica` → Authenticate; в браузере войти в Multica (если вход уже есть — сразу экран согласия) и нажать «Разрешить».
+2. В сессии Claude Code вызвать `multica` с `{"args": ["issue", "get", "STT-506"]}` — должна вернуться карточка задачи;
+   `{"args": ["workspace", "list"]}` — все воркспейсы, где вы состоите.
+3. `sudo bash /home/agents/ops/stt-506/status.sh`: в аудите запись с вашим именем в поле `client` и `issue get`; в строке grant-ов — ваше имя.
+4. То же в claude.ai (web): Customize → Connectors → Add custom connector → URL, без заголовков.
+
+Отзыв доступа пользователя: отозвать его PAT «Claude MCP: …» в Multica (Settings → Tokens) — следующий запрос MCP и refresh
+получают отказ, перезапуск не нужен. Клиент может отозвать свой grant сам через `POST /mcp/oauth/revoke`; это блокирует
+токены в MCP, но PAT в Multica **не** удаляет — его отзывают там же в настройках токенов.
 
 ## Откат
 
@@ -148,4 +211,4 @@ caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && systemctl re
 systemctl disable --now multica-tasks-mcp.service
 ```
 
-Затем отозвать PAT в Multica. Файлы и пользователь `multica-mcp` можно оставить.
+Затем отозвать PAT в Multica. Файлы и пользователь `multica-mcp` можно оставить. Отдельно отключить только OAuth — откат шага 10.

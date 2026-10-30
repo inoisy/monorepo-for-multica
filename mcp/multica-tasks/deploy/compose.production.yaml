@@ -12,10 +12,15 @@ services:
       MULTICA_MCP_PORT: "8101"
       STATE_DIRECTORY: /state
       MULTICA_MCP_RUN_DIR: /run/multica-cli
+      # Вход через OAuth (STT-506): ключ шифрования выданных PAT. Файл создаёт скрипт оператора (ROOT-STEPS.md) до пересоздания.
+      MULTICA_MCP_OAUTH_KEY_FILE: /etc/multica-tasks-mcp/oauth.key
+      MULTICA_MCP_PUBLIC_URL: https://multica.yakutov.com
     volumes:
       - /var/lib/multica-tasks-mcp:/state
       # Файл клиентов: владелец — UID/GID сервиса, 0600 (ROOT-STEPS.md, шаг «Личные ключи»)
       - /etc/multica-tasks-mcp/clients.json:/etc/multica-tasks-mcp/clients.json:ro
+      # Ключ Fernet: владелец — UID/GID сервиса, 0600, вне каталога состояния (рядом с oauth.sqlite его хранить нельзя)
+      - /etc/multica-tasks-mcp/oauth.key:/etc/multica-tasks-mcp/oauth.key:ro
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

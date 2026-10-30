@@ -95,6 +95,14 @@ CLI подменяется фейковым скриптом (`tests/support.py`
 Вручную: `MULTICA_BIN=<фейк> MULTICA_MCP_PORT=… python3 -I bin/multica-tasks-mcp`, затем `curl -i -X POST localhost:<порт>/mcp`
 (401), с ключом клиента и `{"method":"tools/list"}` (200).
 
+## Вход через OAuth
+
+Сервис — сервер авторизации по спецификации MCP: discovery (`/.well-known/oauth-protected-resource[/mcp]`,
+`/.well-known/oauth-authorization-server`), DCR, code + PKCE S256, refresh с ротацией, отзыв. Вход делегирован Multica:
+после согласия сервис выпускает отдельный PAT «Claude MCP: …» на 90 дней, хранит его зашифрованным (Fernet, ключ в
+`MULTICA_MCP_OAUTH_KEY_FILE`, отдельно от `oauth.sqlite`). Включение, выкатка, проверка и откат — `ROOT-STEPS.md`, шаг 10;
+подключение пользователей — `CONNECT.md`.
+
 ## Выкладка
 
 Образ собирается из `Dockerfile` (бинарь `multica` берётся из образа backend, тег закреплён в `ARG MULTICA_BACKEND_IMAGE`: при обновлении платформы поднять его); подготовка перехода на compose: `compose.yaml` для
@@ -112,6 +120,6 @@ CLI подменяется фейковым скриптом (`tests/support.py`
 ## Чего нет
 
 - Удаления задач и любых сущностей, правки инструкций, env, навыков и MCP агентов, токенов, секретов, deploy/rollback.
-- OAuth: ключ в заголовке. OAuth понадобится, если коннектор придётся отдавать посторонним.
+- Своего входа и пользователей у сервиса нет: личность подтверждает Multica (OAuth-согласие после входа в Multica); Bearer-ключи остаются запасным путём.
 - Поведение платформы «статус → `todo` не будит агента» не меняется. Ловушки CLI (какая команда стартует ран) описаны в `CONNECT.md`.
 - Воркспейс со slug `mcp` становится недоступен по пути `/mcp` на этом домене.
