@@ -9,6 +9,8 @@ MIN_KEY_LENGTH = 32
 DEFAULT_ORIGINS = ('https://claude.ai', 'https://claude.com')
 DEFAULT_HOSTS = ('multica.yakutov.com', '127.0.0.1', 'localhost')
 DEFAULT_CLIENT = 'Claude (MCP)'
+DEFAULT_PUBLIC_URL = 'https://multica.yakutov.com'
+ALL_WORKSPACES = '*'  # все воркспейсы, где состоит владелец PAT, включая появившиеся позже
 TRUE = ('1', 'true', 'yes')
 
 
@@ -28,6 +30,16 @@ class Client:
     token: str
     workspaces: tuple
     read_only: bool = False  # только команды чтения
+    ident: str = ''  # ключ кэша и аудита: у OAuth — пользователь Multica, одинаковые отображаемые имена не смешиваются
+    source: str = 'key'  # key — Bearer-ключ из конфигурации, oauth — вход через Multica
+
+    @property
+    def cache_key(self):
+        return self.ident or self.name
+
+    @property
+    def any_workspace(self):
+        return ALL_WORKSPACES in self.workspaces
 
 
 def load_clients(path, default_workspaces):
@@ -57,6 +69,8 @@ def load_clients(path, default_workspaces):
         if not isinstance(workspaces, list) or not workspaces or not all(isinstance(w, str) and w.strip() for w in workspaces):
             raise ConfigError(f'MULTICA_MCP_CLIENTS[{i}]: workspaces — непустой массив строк '
                               '(или задайте MULTICA_MCP_WORKSPACES по умолчанию)')
+        if ALL_WORKSPACES in workspaces and len(workspaces) > 1:
+            raise ConfigError(f'MULTICA_MCP_CLIENTS[{i}]: "*" нельзя смешивать с перечнем воркспейсов')
         read_only = row.get('read_only', False)
         if not isinstance(read_only, bool):
             raise ConfigError(f'MULTICA_MCP_CLIENTS[{i}]: read_only — true или false')
@@ -68,6 +82,8 @@ def load_clients(path, default_workspaces):
 class Config:
     api_url: str
     clients: tuple
+    oauth_key_file: Path | None = None  # ключ шифрования PAT; задан — включён вход через Multica
+    public_url: str = DEFAULT_PUBLIC_URL  # issuer и база адресов OAuth; resource = public_url + /mcp
     multica_bin: str = '/usr/local/bin/multica'
     run_dir: str | None = None  # где создаются пустые cwd запусков; None — системный TMPDIR
     state_dir: Path = Path('.')
@@ -110,8 +126,13 @@ class Config:
             clients.append(Client(DEFAULT_CLIENT, key, need('MULTICA_PAT'), default_workspaces, read_only))
         if env.get('MULTICA_MCP_CLIENTS', '').strip():
             clients += load_clients(env['MULTICA_MCP_CLIENTS'].strip(), default_workspaces)
-        if not clients:
-            raise ConfigError('нет клиентов: задайте MULTICA_MCP_KEY + MULTICA_PAT и/или MULTICA_MCP_CLIENTS')
+        oauth_key = env.get('MULTICA_MCP_OAUTH_KEY_FILE', '').strip()
+        if not clients and not oauth_key:
+            raise ConfigError('нет клиентов: задайте MULTICA_MCP_KEY + MULTICA_PAT, MULTICA_MCP_CLIENTS '
+                              'и/или MULTICA_MCP_OAUTH_KEY_FILE')
+        public_url = (env.get('MULTICA_MCP_PUBLIC_URL', '').strip() or DEFAULT_PUBLIC_URL).rstrip('/')
+        if not re.fullmatch(r'https?://[A-Za-z0-9.-]+(:\d+)?', public_url):
+            raise ConfigError('MULTICA_MCP_PUBLIC_URL: нужен http(s)://хост[:порт] без пути')
         names = [c.name.lower() for c in clients]
         if len(set(names)) != len(names):
             raise ConfigError('имена клиентов не уникальны')
@@ -125,6 +146,7 @@ class Config:
             raise ConfigError('MULTICA_MCP_PORT вне диапазона')
         return cls(
             api_url=api_url, clients=tuple(clients), state_dir=Path(state),
+            oauth_key_file=Path(oauth_key) if oauth_key else None, public_url=public_url,
             multica_bin=env.get('MULTICA_BIN', '/usr/local/bin/multica'), run_dir=env.get('MULTICA_MCP_RUN_DIR') or None,
             host=env.get('MULTICA_MCP_HOST', '127.0.0.1'), port=port,
             allowed_origins=_list(env.get('MULTICA_MCP_ALLOWED_ORIGINS')) or DEFAULT_ORIGINS,

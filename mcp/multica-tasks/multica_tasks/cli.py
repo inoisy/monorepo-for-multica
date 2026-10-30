@@ -1,4 +1,4 @@
-"""Сборка и запуск: конфигурация из окружения → сервер. Ключи и PAT в логи не пишутся."""
+"""Сборка и запуск: конфигурация из окружения → сервер. Ключи, PAT и токены OAuth в логи не пишутся."""
 import json
 import logging
 import os
@@ -9,6 +9,11 @@ import threading
 from .audit import AuditLog
 from .config import Config, ConfigError
 from .http import make_server
+from .multica_auth import MulticaApi
+from .oauth_http import OAuthHttp
+from .oauth_service import OAuthService, load_key
+from .oauth_store import OAuthStore
+from .redaction import Redactor
 from .runner import Runner
 from .service import Service
 
@@ -34,8 +39,18 @@ def main(env=None):
         log.error('конфигурация: %s', e)
         return 2
     config.state_dir.mkdir(parents=True, exist_ok=True)
-    audit = AuditLog(config.state_dir / 'audit.jsonl', config.secrets)
-    server = make_server(config, Service(Runner(config), audit))
+    redactor = Redactor(config.secrets)  # общий для аудита и раннера: PAT, выданные входом через OAuth, добавляются на лету
+    audit = AuditLog(config.state_dir / 'audit.jsonl', redactor=redactor)
+    oauth = None
+    if config.oauth_key_file:
+        try:
+            key = load_key(config.oauth_key_file)
+        except ConfigError as e:
+            log.error('конфигурация: %s', e)
+            return 2
+        oauth = OAuthHttp(OAuthService(config, OAuthStore(config.state_dir / 'oauth.sqlite'), MulticaApi(config.api_url),
+                                       key, redactor), config)
+    server = make_server(config, Service(Runner(config, redactor=redactor), audit), oauth=oauth)
     # shutdown() блокируется до выхода из serve_forever: из обработчика сигнала зовём его в отдельном потоке
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown).start())
     log.info('слушаю %s:%s', config.host, config.port)

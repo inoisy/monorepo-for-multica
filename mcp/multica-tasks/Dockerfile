@@ -15,6 +15,8 @@ RUN groupadd --gid 10001 mcp \
     && install -d -m 1777 /run/multica-cli
 COPY --from=multica-cli /app/multica /usr/local/bin/multica
 WORKDIR /app
+COPY requirements.txt requirements.txt
+RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
 COPY bin/ bin/
 COPY multica_tasks/ multica_tasks/
 COPY deploy/probe.py deploy/probe.py
