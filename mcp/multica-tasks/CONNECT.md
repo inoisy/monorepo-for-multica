@@ -73,7 +73,7 @@ claude mcp add --transport http multica https://multica.yakutov.com/mcp --header
 | Команды | Доступ |
 |---|---|
 | `issue` — чтение: list, get, search, children, pull-requests, timeline, runs, run-messages, usage; `comment`/`subscriber`/`label`/`property list`, `metadata list\|get`, `wakeup list\|get\|runs\|events` | да |
-| `issue` — запись: create, update, assign, status, reorder, rerun-task, cancel-task, steer, model-profile, stages; `comment add\|update\|resolve\|unresolve`, `subscriber`/`label add\|remove`, `metadata set`, `property set\|unset`, `wakeup create\|update\|disable\|trigger\|checkin` | да, кроме ключей только для чтения |
+| `issue` — запись: create, update, assign, status, reorder, rerun-task, cancel-task, steer, model-profile; `comment add\|update\|resolve\|unresolve`, `subscriber`/`label add\|remove`, `metadata set`, `property set\|unset`, `wakeup create\|update\|disable\|trigger\|checkin` | да, кроме ключей только для чтения |
 | `project list\|get`, `agent list\|get\|models\|tasks`, `squad list\|get`, `squad member list`, `profile list`, `workflow list`, `label list`, `property list`, `skill list\|get`, `runtime unavailable`, `subscription list`, `workspace list`, `version` | чтение |
 | удаление (`issue comment delete`, `issue metadata delete`, `issue wakeup delete`, любые `delete`), `agent models <агент> set\|profile\|personal\|single\|tools\|reset`, `runtime unavailable recheck`, `skill get --with-content` | нет |
 | всё остальное (`agent create/update`, `skill create/update/delete`, `autopilot`, `pool`, `daemon`, `auth`, `config`, `repo`, `attachment`, …) и новые подкоманды CLI, пока их не внесли в таблицу | нет, только по ssh |
