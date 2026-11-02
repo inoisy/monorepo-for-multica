@@ -39,7 +39,7 @@ Python 3.12, только stdlib. Установка и подключение: 
 | Команды | Доступ |
 |---|---|
 | `issue list\|get\|search\|children\|pull-requests\|timeline\|runs\|run-messages\|usage`, `issue comment\|subscriber\|label\|property list`, `issue metadata list\|get`, `issue wakeup list\|get\|runs\|events` | чтение |
-| `issue create\|update\|assign\|status\|reorder\|rerun-task\|cancel-task\|steer\|model-profile\|stages`, `issue comment add\|update\|resolve\|unresolve`, `issue subscriber\|label add\|remove`, `issue metadata set`, `issue property set\|unset`, `issue wakeup create\|update\|disable\|trigger\|checkin` | запись |
+| `issue create\|update\|assign\|status\|reorder\|rerun-task\|cancel-task\|steer\|model-profile`, `issue comment add\|update\|resolve\|unresolve`, `issue subscriber\|label add\|remove`, `issue metadata set`, `issue property set\|unset`, `issue wakeup create\|update\|disable\|trigger\|checkin` | запись |
 | `project list\|get`, `agent list\|get\|models\|tasks`, `squad list\|get`, `squad member list`, `profile list`, `workflow list`, `label list`, `property list`, `skill list\|get`, `runtime unavailable`, `subscription list`, `workspace list`, `version` | чтение; у `agent models` запрещены `set`, `profile`, `personal`, `single`, `tools`, `reset`; `skill get --with-content` и `runtime unavailable recheck` запрещены |
 | `--help`, `-h` | на любой разрешённой команде и группе |
 

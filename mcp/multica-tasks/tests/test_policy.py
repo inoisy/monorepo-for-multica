@@ -14,7 +14,7 @@ ALLOWED = (
     ['issue', 'create', '--title', 'x', '--description-stdin'], ['issue', 'update', 'TST-1', '--title', 'y'],
     ['issue', 'assign', 'TST-1', '--unassign'], ['issue', 'status', 'TST-1', 'done'], ['issue', 'reorder', 'TST-1'],
     ['issue', 'rerun-task', 'r'], ['issue', 'cancel-task', 'x'], ['issue', 'steer', 'TST-1', '--content-stdin'],
-    ['issue', 'model-profile', 'TST-1'], ['issue', 'stages', 'TST-1'],
+    ['issue', 'model-profile', 'TST-1'],
     ['issue', 'comment', 'add', 'TST-1', '--content-stdin'], ['issue', 'comment', 'update', 'c', '--content', 'x'],
     ['issue', 'comment', 'resolve', 'c'], ['issue', 'comment', 'unresolve', 'c'], ['issue', 'subscriber', 'add', 'TST-1'],
     ['issue', 'subscriber', 'remove', 'TST-1'], ['issue', 'label', 'add', 'TST-1', 'l'], ['issue', 'label', 'remove', 'TST-1', 'l'],

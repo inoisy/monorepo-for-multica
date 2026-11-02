@@ -36,7 +36,6 @@ COMMANDS = {
     ('issue', 'cancel-task'): (WRITE, ()),
     ('issue', 'steer'): (WRITE, ()),  # и `steer retry`
     ('issue', 'model-profile'): (WRITE, ()),  # показ и смена одной командой
-    ('issue', 'stages'): (WRITE, ()),  # показ и смена одной командой
     ('issue', 'comment', 'add'): (WRITE, ()),
     ('issue', 'comment', 'update'): (WRITE, ()),
     ('issue', 'comment', 'resolve'): (WRITE, ()),
