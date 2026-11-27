@@ -53,6 +53,10 @@ class Unavailable(Exception):
     """Multica не ответила: доступ закрыт временной ошибкой, grant не трогаем."""
 
 
+class AlreadyDecided(Exception):
+    """Повторная отправка уже решённого запроса тем же пользователем: второй PAT не выпускаем, но и ошибкой не пугаем."""
+
+
 class PageError(Exception):
     """Ошибка до проверки redirect_uri: пользователю показываем страницу, по redirect_uri не возвращаем."""
 
@@ -246,9 +250,12 @@ class OAuthService:
             raise OAuthError('invalid_csrf', 'форма согласия устарела, начните подключение заново', 403)
         pending = self.store.take_pending(req_id, self.clock())
         if not pending:
+            if self.store.decided_by(req_id, user.id, self.clock()):
+                raise AlreadyDecided()
             raise OAuthError('expired_request', 'запрос подключения истёк, начните заново', 400)
         redirect_uri, state = pending['redirect_uri'], pending['state']
         if not approve:
+            self.store.remember_decision(req_id, user.id, pending['expires'])
             return _with_params(redirect_uri, {'error': 'access_denied', 'state': state})
         client = self.store.get_client(pending['client_id'])
         session, csrf_cookie = session_from_cookie_header(cookie_header)
@@ -268,6 +275,7 @@ class OAuthService:
         self.store.create_grant_with_code(grant, _hash(code), {
             'client_id': client['client_id'], 'redirect_uri': redirect_uri, 'challenge': pending['challenge'],
             'resource': pending['resource'], 'expires': now + CODE_TTL})
+        self.store.remember_decision(req_id, user.id, pending['expires'])
         log.info('grant выдан', extra={'ctx': {'user_id': user.id, 'client': client['name']}})
         return _with_params(redirect_uri, {'code': code, 'state': state})
 
