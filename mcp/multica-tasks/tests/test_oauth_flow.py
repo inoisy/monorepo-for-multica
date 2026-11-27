@@ -231,8 +231,24 @@ class Consent(OAuthCase):
         _, html, _ = self.consent_page(self.req)
         csrf = self.csrf_of(html)
         self.assertEqual(self.decide(self.req, csrf)[0], 302)
-        self.assertEqual(self.decide(self.req, csrf)[0], 400)
+        status, html, _ = self.decide(self.req, csrf)
+        self.assertEqual(status, 200)
+        self.assertIn('уже обработан', html.decode())
         self.assertEqual(len(self.multica.created), 1)
+
+    def test_повтор_после_отказа_тоже_уже_обработан(self):
+        _, html, _ = self.consent_page(self.req)
+        csrf = self.csrf_of(html)
+        self.assertEqual(self.decide(self.req, csrf, decision='deny')[0], 302)
+        self.assertEqual(self.decide(self.req, csrf)[0], 200)
+        self.assertEqual(self.multica.created, [])
+
+    def test_повтор_после_срока_запроса_это_истёк(self):
+        _, html, _ = self.consent_page(self.req)
+        csrf = self.csrf_of(html)
+        self.assertEqual(self.decide(self.req, csrf)[0], 302)
+        self.clock.advance(11 * 60)
+        self.assertEqual(self.decide(self.req, csrf)[0], 400)
 
     def test_запрос_истекает(self):
         self.clock.advance(11 * 60)

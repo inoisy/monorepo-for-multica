@@ -49,6 +49,12 @@ def error(message):
                  '<p class="muted">Закройте это окно и повторите подключение в приложении.</p>')
 
 
+def done():
+    return _page('Подключение к Multica', '<h1>Запрос уже обработан</h1>'
+                 '<p>Ответ на этот запрос подключения уже отправлен в приложение.</p>'
+                 '<p class="muted">Окно можно закрыть.</p>')
+
+
 def continue_page(url):
     """Переход с нашей же страницы: cookie сессии Multica (SameSite=Strict) не уходят в запросе, начатом с чужого сайта."""
     return ('<!doctype html><html lang="ru"><head><meta charset="utf-8">'

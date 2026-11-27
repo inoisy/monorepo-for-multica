@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from . import consent_page
 from .http import AuthLimiter
-from .oauth_service import OAuthError, PageError, Unavailable
+from .oauth_service import AlreadyDecided, OAuthError, PageError, Unavailable
 
 PRM_PATHS = ('/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp')
 AS_PATH = '/.well-known/oauth-authorization-server'
@@ -143,6 +143,8 @@ class OAuthHttp:
         try:
             location = self.service.decide(h.headers.get('Cookie', ''), form.get('req', ''), form.get('csrf', ''),
                                            decision == 'approve')
+        except AlreadyDecided:
+            return h.send_html(200, consent_page.done())
         except OAuthError as e:
             self.failures.fail(ip)
             return h.send_html(e.status, consent_page.error(e.description))

@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS codes (hash TEXT PRIMARY KEY, grant_id TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS tokens (hash TEXT PRIMARY KEY, kind TEXT NOT NULL, grant_id TEXT NOT NULL, expires REAL NOT NULL,
     used INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS tokens_grant ON tokens (grant_id);
+CREATE TABLE IF NOT EXISTS decided (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires REAL NOT NULL);
 '''
 
 
@@ -84,6 +85,13 @@ class OAuthStore:
                 self._db.execute('ROLLBACK')
                 raise
         return dict(row) if row else None
+
+    def remember_decision(self, req_id, user_id, expires):
+        """Запрос уже решён этим пользователем: повторная отправка формы покажет «готово», а не «истёк»."""
+        self._write('INSERT OR REPLACE INTO decided VALUES (?,?,?)', (req_id, user_id, expires))
+
+    def decided_by(self, req_id, user_id, now):
+        return self._one('SELECT 1 AS ok FROM decided WHERE id=? AND user_id=? AND expires>?', (req_id, user_id, now)) is not None
 
     # --- grant, code, токены ---------------------------------------------------------------------
 
@@ -169,6 +177,7 @@ class OAuthStore:
         """Убирает просроченное; семейство отозванного grant остаётся, пока не истёк срок: повтор refresh должен давать invalid_grant."""
         with self._lock:
             self._db.execute('DELETE FROM pending WHERE expires<=?', (now,))
+            self._db.execute('DELETE FROM decided WHERE expires<=?', (now,))
             self._db.execute('DELETE FROM codes WHERE expires<=?', (now,))
             self._db.execute('DELETE FROM tokens WHERE expires<=?', (now,))
             self._db.execute('DELETE FROM grants WHERE expires<=?', (now,))
